@@ -1,0 +1,89 @@
+# .github/workflows/release.yml
+
+name: Create Release on Version Commit
+
+# This action runs on every push to the main branch
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  # This job builds the binaries for Linux and Windows
+  build:
+    name: Build Binaries
+    # Only run this job if the commit message contains a version tag like "vX.Y.Z"
+    if: "contains(github.event.head_commit.message, 'v')"
+
+    # Use a matrix to run the same steps on different operating systems
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Extract version from commit message
+      id: get_version
+      run: echo "VERSION=$(echo '${{ github.event.head_commit.message }}' | grep -o 'v[0-9]*\.[0-9]*\.[0-9]*')" >> $GITHUB_ENV
+
+    - name: Build on Linux
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        # Compile the C code with the new binary name "tinygate"
+        gcc -std=c23 -Wall -Wextra -pthread main.c config.c -o tinygate
+        # Create a versioned archive
+        tar -czvf tinygate-${{ env.VERSION }}-linux.tar.gz tinygate
+
+    - name: Build on Windows
+      if: matrix.os == 'windows-latest'
+      run: |
+        # Compile the C code with the new binary name "tinygate.exe"
+        gcc -std=c23 -Wall -Wextra -pthread main.c config.c -o tinygate.exe -lws2_32
+        # Create a versioned archive
+        7z a -tzip tinygate-${{ env.VERSION }}-windows.zip tinygate.exe
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: proxy-binaries-${{ matrix.os }}
+        path: tinygate-*.* # Uploads the newly named and versioned file
+
+  # This job creates the GitHub Release and uploads the built binaries
+  create_release:
+    name: Create GitHub Release
+    # This job depends on the 'build' job, so it will only run if building succeeds
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Extract version from commit message
+      id: get_version
+      # This command uses grep to find the version string (e.g., v1.2.3) in the commit message
+      run: echo "VERSION=$(echo '${{ github.event.head_commit.message }}' | grep -o 'v[0-9]*\.[0-9]*\.[0-9]*')" >> $GITHUB_ENV
+
+    - name: Download all build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: artifacts/ # Download all artifacts into this directory
+
+    - name: Create Release and Upload Assets
+      uses: softprops/action-gh-release@v1
+      with:
+        # The tag name and release name are set using the version from the commit message
+        tag_name: ${{ env.VERSION }}
+        name: "Release ${{ env.VERSION }}"
+        body: "Automated release based on commit message."
+        # Use a glob pattern to find and upload the versioned artifact files
+        files: |
+          artifacts/proxy-binaries-ubuntu-latest/tinygate-*.tar.gz
+          artifacts/proxy-binaries-windows-latest/tinygate-*.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
