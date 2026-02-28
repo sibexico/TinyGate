@@ -3,6 +3,8 @@ It's crossplatform (Windows/Linux), uses thread pool and have very simple config
 
 The project was developed in 2020-2021 during COVID-19 pandemic. Code was refactored and adapted to C23 in 2025. 
 
+**Version 0.3 is basically ready to use in the real environment.**
+
 ## Configuration
 **`[proxy_settings]`**
 * `listen_ip`: IP for listening (`0.0.0.0` for all interfaces).

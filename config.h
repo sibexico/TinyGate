@@ -3,6 +3,10 @@
 
 #include <stdbool.h>
 
+#if !defined(__STDC_VERSION__) || (__STDC_VERSION__ < 202311L)
+    #error TinyGate requires C23.
+#endif
+
 typedef struct ProxyRule {
     char* entry_domain;
     char* endpoint_host;
