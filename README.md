@@ -10,8 +10,7 @@ TinyGate supports TLS certificates, SNI-based certificate selection, and optiona
 * `worker_threads`: The number of worker threads in the thread pool.
 
 * `[your.domain.com]`: Targeted host.
-* `endpoint_host`: The hostname of the backend server.
-* `endpoint_port`: The port of the backend server.
+* `endpoint`: Backend target in `host:port` format (example: `127.0.0.1:8080`).
 * `tls_cert_file`: Path to PEM certificate.
 * `tls_key_file`: Path to PEM private key.
 * `force_ssl`: HTTP requests for this domain are forced to HTTPS.
@@ -26,15 +25,13 @@ listen_ssl_port = 443
 worker_threads = 2
 
 [localhost]
-endpoint_host = 127.0.0.1
-endpoint_port = 8080
+endpoint = 127.0.0.1:8080
 tls_cert_file = 
 tls_key_file = 
 force_ssl = false
 
 [example.com]
-endpoint_host = 127.0.0.1
-endpoint_port = 8081
+endpoint = 127.0.0.1:8081
 tls_cert_file = certs/example.com.crt
 tls_key_file = certs/example.com.key
 force_ssl = true
@@ -56,8 +53,7 @@ certbot certonly --standalone -d example.com -m you@example.com --agree-tos --no
 
 ```ini
 [example.com]
-endpoint_host = 127.0.0.1
-endpoint_port = 8081
+endpoint = 127.0.0.1:8081
 tls_cert_file = /etc/letsencrypt/live/example.com/fullchain.pem
 tls_key_file = /etc/letsencrypt/live/example.com/privkey.pem
 force_ssl = true

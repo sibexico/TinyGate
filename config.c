@@ -8,6 +8,8 @@
 
 #define LINE_BUFFER_SIZE 256
 
+static bool parse_endpoint_value(const char* text, char** out_host, int* out_port);
+
 static char* duplicate_string(const char* source) {
     size_t length = strlen(source);
     char* copy = malloc(length + 1);
@@ -143,16 +145,15 @@ Config* load_config(const char* filename) {
                 char* value = trim_whitespace(equals + 1);
 
                 if (current_rule) {
-                    if (strcmp(key, "endpoint_host") == 0) {
-                        char* next_host = duplicate_string(value);
-                        if (next_host) {
-                            free(current_rule->endpoint_host);
-                            current_rule->endpoint_host = next_host;
-                        }
-                    } else if (strcmp(key, "endpoint_port") == 0) {
+                    if (strcmp(key, "endpoint") == 0) {
+                        char* parsed_host = NULL;
                         int parsed_port = 0;
-                        if (parse_int_value(value, &parsed_port) && parsed_port > 0 && parsed_port <= 65535) {
-                            current_rule->endpoint_port = parsed_port;
+                        if (parse_endpoint_value(value, &parsed_host, &parsed_port)) {
+                            free(current_rule->backend_host);
+                            current_rule->backend_host = parsed_host;
+                            current_rule->backend_port = parsed_port;
+                        } else {
+                            fprintf(stderr, "Invalid endpoint '%s' for domain %s. Use host:port\n", value, current_rule->entry_domain);
                         }
                     } else if (strcmp(key, "tls_cert_file") == 0) {
                         char* next_cert_file = duplicate_string(value);
@@ -211,7 +212,7 @@ void free_config(Config* config) {
     while (current) {
         ProxyRule* next = current->next;
         free(current->entry_domain);
-        free(current->endpoint_host);
+        free(current->backend_host);
         free(current->tls_cert_file);
         free(current->tls_key_file);
         free(current);
@@ -228,4 +229,54 @@ const ProxyRule* find_rule(const Config* config, const char* host) {
         }
     }
     return NULL;
+}
+
+static bool parse_endpoint_value(const char* text, char** out_host, int* out_port) {
+    if (!text || !out_host || !out_port || text[0] == '\0') {
+        return false;
+    }
+
+    const char* host_start = text;
+    size_t host_length = 0;
+    const char* port_text = NULL;
+
+    if (text[0] == '[') {
+        const char* closing_bracket = strchr(text, ']');
+        if (!closing_bracket || closing_bracket[1] != ':') {
+            return false;
+        }
+
+        host_start = text + 1;
+        host_length = (size_t)(closing_bracket - host_start);
+        port_text = closing_bracket + 2;
+    } else {
+        const char* separator = strrchr(text, ':');
+        if (!separator) {
+            return false;
+        }
+
+        host_length = (size_t)(separator - text);
+        port_text = separator + 1;
+    }
+
+    if (host_length == 0 || !port_text || port_text[0] == '\0') {
+        return false;
+    }
+
+    int parsed_port = 0;
+    if (!parse_int_value(port_text, &parsed_port) || parsed_port <= 0 || parsed_port > 65535) {
+        return false;
+    }
+
+    char* host_copy = malloc(host_length + 1);
+    if (!host_copy) {
+        return false;
+    }
+
+    memcpy(host_copy, host_start, host_length);
+    host_copy[host_length] = '\0';
+
+    *out_host = host_copy;
+    *out_port = parsed_port;
+    return true;
 }

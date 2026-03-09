@@ -998,17 +998,24 @@ bool backend_cache_init(BackendCache* cache, const Config* config) {
     cache->entries = NULL;
 
     for (const ProxyRule* rule = config->rules; rule != NULL; rule = rule->next) {
+        if (!rule->backend_host || rule->backend_host[0] == '\0' || rule->backend_port <= 0 || rule->backend_port > 65535) {
+            fprintf(stderr, "Invalid or missing endpoint for domain %s\n", rule->entry_domain);
+            backend_cache_cleanup(cache);
+            return false;
+        }
+
         struct addrinfo hints = {0};
         hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_STREAM;
 
         char port_str[6];
-        snprintf(port_str, sizeof(port_str), "%d", rule->endpoint_port);
+        snprintf(port_str, sizeof(port_str), "%d", rule->backend_port);
 
         struct addrinfo* result = NULL;
-        if (getaddrinfo(rule->endpoint_host, port_str, &hints, &result) != 0 || result == NULL) {
-            fprintf(stderr, "Failed to resolve backend %s:%d for domain %s\n", rule->endpoint_host, rule->endpoint_port, rule->entry_domain);
-            continue;
+        if (getaddrinfo(rule->backend_host, port_str, &hints, &result) != 0 || result == NULL) {
+            fprintf(stderr, "Failed to resolve backend %s:%d for domain %s\n", rule->backend_host, rule->backend_port, rule->entry_domain);
+            backend_cache_cleanup(cache);
+            return false;
         }
 
         BackendEntry* entry = malloc(sizeof(*entry));
@@ -1021,7 +1028,9 @@ bool backend_cache_init(BackendCache* cache, const Config* config) {
         if ((size_t)result->ai_addrlen > sizeof(entry->addr)) {
             free(entry);
             freeaddrinfo(result);
-            continue;
+            fprintf(stderr, "Resolved backend address too large for domain %s\n", rule->entry_domain);
+            backend_cache_cleanup(cache);
+            return false;
         }
 
         entry->rule = rule;
@@ -1034,6 +1043,11 @@ bool backend_cache_init(BackendCache* cache, const Config* config) {
         cache->entries = entry;
 
         freeaddrinfo(result);
+    }
+
+    if (config->rules && !cache->entries) {
+        fprintf(stderr, "No backend endpoints were cached at startup.\n");
+        return false;
     }
 
     return true;
