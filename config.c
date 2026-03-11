@@ -6,9 +6,17 @@
 #include <errno.h>
 #include <limits.h>
 
+#ifdef _WIN32
+    #include <windows.h>
+#else
+    #include <unistd.h>
+#endif
+
 #define LINE_BUFFER_SIZE 256
 
 static bool parse_endpoint_value(const char* text, char** out_host, int* out_port);
+static int detect_worker_threads(void);
+static char* duplicate_string_lower(const char* source);
 
 static char* duplicate_string(const char* source) {
     size_t length = strlen(source);
@@ -17,6 +25,20 @@ static char* duplicate_string(const char* source) {
         return NULL;
     }
     memcpy(copy, source, length + 1);
+    return copy;
+}
+
+static char* duplicate_string_lower(const char* source) {
+    size_t length = strlen(source);
+    char* copy = malloc(length + 1);
+    if (!copy) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < length; i++) {
+        copy[i] = (char)tolower((unsigned char)source[i]);
+    }
+    copy[length] = '\0';
     return copy;
 }
 
@@ -86,6 +108,23 @@ static bool equal_ignore_case(const char* left, const char* right) {
     return *left == '\0' && *right == '\0';
 }
 
+static int detect_worker_threads(void) {
+#ifdef _WIN32
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    if (info.dwNumberOfProcessors > 0 && info.dwNumberOfProcessors <= INT_MAX) {
+        return (int)info.dwNumberOfProcessors;
+    }
+#elif defined(_SC_NPROCESSORS_ONLN)
+    long cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (cores > 0 && cores <= INT_MAX) {
+        return (int)cores;
+    }
+#endif
+
+    return 2;
+}
+
 Config* load_config(const char* filename) {
     FILE* file = fopen(filename, "r");
     if (!file) {
@@ -103,7 +142,7 @@ Config* load_config(const char* filename) {
     config->listen_ip = duplicate_string("127.0.0.1");
     config->listen_port = 80;
     config->listen_ssl_port = 443;
-    config->worker_threads = 2;
+    config->worker_threads = detect_worker_threads();
     if (!config->listen_ip) {
         perror("Failed to allocate memory for listen_ip");
         fclose(file);
@@ -128,7 +167,10 @@ Config* load_config(const char* filename) {
                 current_rule = (strcmp(section_name, "proxy_settings") == 0) ? NULL : calloc(1, sizeof(ProxyRule));
                 if (current_rule) {
                     current_rule->entry_domain = duplicate_string(section_name);
-                    if (!current_rule->entry_domain) {
+                    current_rule->entry_domain_lower = duplicate_string_lower(section_name);
+                    if (!current_rule->entry_domain || !current_rule->entry_domain_lower) {
+                        free(current_rule->entry_domain);
+                        free(current_rule->entry_domain_lower);
                         free(current_rule);
                         current_rule = NULL;
                         continue;
@@ -212,6 +254,7 @@ void free_config(Config* config) {
     while (current) {
         ProxyRule* next = current->next;
         free(current->entry_domain);
+        free(current->entry_domain_lower);
         free(current->backend_host);
         free(current->tls_cert_file);
         free(current->tls_key_file);
@@ -224,7 +267,10 @@ void free_config(Config* config) {
 const ProxyRule* find_rule(const Config* config, const char* host) {
     if (!config || !host) return NULL;
     for (const ProxyRule* rule = config->rules; rule != NULL; rule = rule->next) {
-        if (equal_ignore_case(rule->entry_domain, host)) {
+        if (rule->entry_domain_lower && strcmp(rule->entry_domain_lower, host) == 0) {
+            return rule;
+        }
+        if (rule->entry_domain && equal_ignore_case(rule->entry_domain, host)) {
             return rule;
         }
     }

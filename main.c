@@ -3,9 +3,16 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdint.h>
+#include <errno.h>
 
-#if defined(__has_include)
-    #if __has_include(<threads.h>)
+
+//HERE BE DRAGONS!!! In name of all the gods, never touch this crossplatform defines...
+#if !defined(TG_FORCE_PTHREAD)
+    #define TG_FORCE_PTHREAD 0
+#endif
+
+#if defined(__has_include) 
+    #if __has_include(<threads.h>) && !defined(__STDC_NO_THREADS__) && !TG_FORCE_PTHREAD && !(defined(__FreeBSD__) && defined(__GNUC__) && !defined(__clang__))
         #include <threads.h>
         #define TG_HAS_C23_THREADS 1
     #else
@@ -114,8 +121,10 @@ enum { mtx_plain = 0 };
     #define close_socket(s) closesocket(s)
 #else
     #include <unistd.h>
+    #include <sys/select.h>
     #include <sys/socket.h>
     #include <netinet/in.h>
+    #include <netinet/tcp.h>
     #include <arpa/inet.h>
     #include <netdb.h>
     typedef int socket_t;
@@ -129,6 +138,9 @@ enum { mtx_plain = 0 };
 #define HOST_BUFFER_SIZE 256
 #define TARGET_BUFFER_SIZE 2048
 #define REDIRECT_BUFFER_SIZE 3072
+
+static const char RESPONSE_BAD_REQUEST[] = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+static const char RESPONSE_BAD_GATEWAY[] = "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
 
 typedef struct {
     socket_t client_socket;
@@ -186,14 +198,12 @@ void process_connection(Task task, const Config* config, const TlsState* tls_sta
 void relay_data(socket_t client_socket, SSL* client_ssl, bool client_is_tls, socket_t server_socket);
 bool try_parse_host(const char* buffer, char* out_host, size_t out_size);
 bool try_parse_request_target(const char* buffer, char* out_target, size_t out_size);
-const char* cross_platform_strcasestr(const char* haystack, const char* needle);
 bool send_all(socket_t socket, const char* data, size_t length);
 bool client_send_all(socket_t socket, SSL* ssl, bool is_tls, const char* data, size_t length);
 io_count_t client_recv(socket_t socket, SSL* ssl, bool is_tls, char* buffer, size_t length);
 socket_t create_listen_socket(const char* listen_ip, int listen_port);
 void close_client(socket_t socket, SSL* ssl, bool is_tls);
 bool send_redirect_to_https(socket_t socket, SSL* ssl, bool is_tls, const char* host, const char* target, int ssl_port);
-bool strings_equal_ignore_case(const char* left, const char* right);
 bool rule_has_tls_identity(const ProxyRule* rule);
 bool tls_state_init(TlsState* tls_state, const Config* config);
 void tls_state_cleanup(TlsState* tls_state);
@@ -202,6 +212,9 @@ bool tls_state_has_host(const TlsState* tls_state, const char* host);
 bool backend_cache_init(BackendCache* cache, const Config* config);
 void backend_cache_cleanup(BackendCache* cache);
 const BackendEntry* backend_cache_find(const BackendCache* cache, const ProxyRule* rule);
+bool tune_socket(socket_t socket, bool is_listener);
+socket_t accept_client_socket(socket_t listen_socket);
+int socket_send(socket_t socket, const char* data, size_t length);
 
 TaskQueue task_queue;
 
@@ -335,7 +348,7 @@ int main(int argc, char* argv[]) {
 
     while (1) {
         if (!tls_state.enabled) {
-            socket_t client_socket = accept(listen_fd, NULL, NULL);
+            socket_t client_socket = accept_client_socket(listen_fd);
             if (client_socket == INVALID_SOCKET) {
                 perror("accept() failed");
                 continue;
@@ -362,7 +375,7 @@ int main(int argc, char* argv[]) {
         }
 
         if (FD_ISSET(listen_fd, &read_fds)) {
-            socket_t client_socket = accept(listen_fd, NULL, NULL);
+            socket_t client_socket = accept_client_socket(listen_fd);
             if (client_socket != INVALID_SOCKET) {
                 Task task = {
                     .client_socket = client_socket,
@@ -373,7 +386,7 @@ int main(int argc, char* argv[]) {
         }
 
         if (FD_ISSET(listen_ssl_fd, &read_fds)) {
-            socket_t client_socket = accept(listen_ssl_fd, NULL, NULL);
+            socket_t client_socket = accept_client_socket(listen_ssl_fd);
             if (client_socket != INVALID_SOCKET) {
                 Task task = {
                     .client_socket = client_socket,
@@ -419,7 +432,7 @@ void queue_push(TaskQueue* q, Task task) {
         cnd_wait(&q->not_full, &q->mutex);
     }
     q->queue[q->tail] = task;
-    q->tail = (q->tail + 1) % TASK_QUEUE_SIZE;
+    q->tail = (q->tail + 1) & (TASK_QUEUE_SIZE - 1);
     q->count++;
     cnd_signal(&q->not_empty);
     mtx_unlock(&q->mutex);
@@ -431,7 +444,7 @@ Task queue_pop(TaskQueue* q) {
         cnd_wait(&q->not_empty, &q->mutex);
     }
     Task task = q->queue[q->head];
-    q->head = (q->head + 1) % TASK_QUEUE_SIZE;
+    q->head = (q->head + 1) & (TASK_QUEUE_SIZE - 1);
     q->count--;
     cnd_signal(&q->not_full);
     mtx_unlock(&q->mutex);
@@ -485,16 +498,14 @@ void process_connection(Task task, const Config* config, const TlsState* tls_sta
 
     char host[HOST_BUFFER_SIZE];
     if (!try_parse_host(buffer, host, sizeof(host))) {
-        const char* bad_request = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-        (void)client_send_all(client_socket, client_ssl, task.is_tls, bad_request, strlen(bad_request));
+        (void)client_send_all(client_socket, client_ssl, task.is_tls, RESPONSE_BAD_REQUEST, sizeof(RESPONSE_BAD_REQUEST) - 1);
         close_client(client_socket, client_ssl, task.is_tls);
         return;
     }
 
     const ProxyRule* rule = find_rule(config, host);
     if (!rule) {
-        const char* not_found = "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-        (void)client_send_all(client_socket, client_ssl, task.is_tls, not_found, strlen(not_found));
+        (void)client_send_all(client_socket, client_ssl, task.is_tls, RESPONSE_BAD_GATEWAY, sizeof(RESPONSE_BAD_GATEWAY) - 1);
         close_client(client_socket, client_ssl, task.is_tls);
         return;
     }
@@ -509,8 +520,7 @@ void process_connection(Task task, const Config* config, const TlsState* tls_sta
         if (can_redirect) {
             (void)send_redirect_to_https(client_socket, client_ssl, false, host, target, tls_state->listen_ssl_port);
         } else {
-            const char* bad_gateway = "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-            (void)client_send_all(client_socket, client_ssl, false, bad_gateway, strlen(bad_gateway));
+            (void)client_send_all(client_socket, client_ssl, false, RESPONSE_BAD_GATEWAY, sizeof(RESPONSE_BAD_GATEWAY) - 1);
         }
 
         close_client(client_socket, client_ssl, false);
@@ -519,8 +529,7 @@ void process_connection(Task task, const Config* config, const TlsState* tls_sta
 
     const BackendEntry* backend = backend_cache_find(backend_cache, rule);
     if (!backend) {
-        const char* bad_gateway = "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-        (void)client_send_all(client_socket, client_ssl, task.is_tls, bad_gateway, strlen(bad_gateway));
+        (void)client_send_all(client_socket, client_ssl, task.is_tls, RESPONSE_BAD_GATEWAY, sizeof(RESPONSE_BAD_GATEWAY) - 1);
         close_client(client_socket, client_ssl, task.is_tls);
         return;
     }
@@ -530,6 +539,8 @@ void process_connection(Task task, const Config* config, const TlsState* tls_sta
         close_client(client_socket, client_ssl, task.is_tls);
         return;
     }
+
+    (void)tune_socket(server_socket, false);
 
     if (connect(server_socket, (const struct sockaddr*)&backend->addr, backend->addr_len) < 0) {
         close_socket(server_socket);
@@ -592,40 +603,67 @@ void relay_data(socket_t client_socket, SSL* client_ssl, bool client_is_tls, soc
 }
 
 bool try_parse_host(const char* buffer, char* out_host, size_t out_size) {
-    const char* host_header = "Host:";
-    const char* host_start = cross_platform_strcasestr(buffer, host_header);
-    if (!host_start) {
-        return false;
+    const char* line = buffer;
+
+    while (*line != '\0') {
+        const char* line_end = strstr(line, "\r\n");
+        if (!line_end) {
+            return false;
+        }
+
+        if (line_end == line) {
+            return false;
+        }
+
+        size_t line_len = (size_t)(line_end - line);
+        if (line_len >= 5 &&
+            ((line[0] | 32) == 'h') &&
+            ((line[1] | 32) == 'o') &&
+            ((line[2] | 32) == 's') &&
+            ((line[3] | 32) == 't') &&
+            line[4] == ':') {
+            const char* host_start = line + 5;
+            while (host_start < line_end && (*host_start == ' ' || *host_start == '\t')) {
+                host_start++;
+            }
+
+            size_t host_len = (size_t)(line_end - host_start);
+            while (host_len > 0 && (host_start[host_len - 1] == ' ' || host_start[host_len - 1] == '\t')) {
+                host_len--;
+            }
+
+            if (host_len == 0 || host_len >= out_size) {
+                return false;
+            }
+
+            for (size_t i = 0; i < host_len; i++) {
+                out_host[i] = (char)tolower((unsigned char)host_start[i]);
+            }
+            out_host[host_len] = '\0';
+
+            if (out_host[0] == '[') {
+                char* closing_bracket = strchr(out_host, ']');
+                if (!closing_bracket) {
+                    return false;
+                }
+
+                size_t bracket_len = (size_t)(closing_bracket - (out_host + 1));
+                memmove(out_host, out_host + 1, bracket_len);
+                out_host[bracket_len] = '\0';
+            } else {
+                char* port_colon = strchr(out_host, ':');
+                if (port_colon) {
+                    *port_colon = '\0';
+                }
+            }
+
+            return out_host[0] != '\0';
+        }
+
+        line = line_end + 2;
     }
 
-    host_start += strlen(host_header);
-    while (*host_start == ' ' || *host_start == '\t') {
-        host_start++;
-    }
-
-    const char* host_end = strstr(host_start, "\r\n");
-    if (!host_end) {
-        return false;
-    }
-
-    size_t host_len = (size_t)(host_end - host_start);
-    while (host_len > 0 && (host_start[host_len - 1] == ' ' || host_start[host_len - 1] == '\t')) {
-        host_len--;
-    }
-
-    if (host_len == 0 || host_len >= out_size) {
-        return false;
-    }
-
-    memcpy(out_host, host_start, host_len);
-    out_host[host_len] = '\0';
-
-    char* port_colon = strchr(out_host, ':');
-    if (port_colon) {
-        *port_colon = '\0';
-    }
-
-    return out_host[0] != '\0';
+    return false;
 }
 
 bool try_parse_request_target(const char* buffer, char* out_target, size_t out_size) {
@@ -703,32 +741,10 @@ bool try_parse_request_target(const char* buffer, char* out_target, size_t out_s
     return true;
 }
 
-const char* cross_platform_strcasestr(const char* haystack, const char* needle) {
-    if (!*needle) {
-        return haystack;
-    }
-
-    for (; *haystack; ++haystack) {
-        if (tolower((unsigned char)*haystack) == tolower((unsigned char)*needle)) {
-            const char* h = haystack;
-            const char* n = needle;
-            while (*h && *n && tolower((unsigned char)*h) == tolower((unsigned char)*n)) {
-                ++h;
-                ++n;
-            }
-            if (!*n) {
-                return haystack;
-            }
-        }
-    }
-
-    return NULL;
-}
-
 bool send_all(socket_t socket, const char* data, size_t length) {
     size_t sent_total = 0;
     while (sent_total < length) {
-        int sent = send(socket, data + sent_total, (int)(length - sent_total), 0);
+        int sent = socket_send(socket, data + sent_total, length - sent_total);
         if (sent <= 0) {
             return false;
         }
@@ -782,8 +798,7 @@ socket_t create_listen_socket(const char* listen_ip, int listen_port) {
         return INVALID_SOCKET;
     }
 
-    int optval = 1;
-    (void)setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&optval, sizeof(optval));
+    (void)tune_socket(listen_fd, true);
 
     struct sockaddr_in server_addr = {0};
     server_addr.sin_family = AF_INET;
@@ -800,7 +815,7 @@ socket_t create_listen_socket(const char* listen_ip, int listen_port) {
         return INVALID_SOCKET;
     }
 
-    if (listen(listen_fd, 64) < 0) {
+    if (listen(listen_fd, SOMAXCONN) < 0) {
         perror("listen() failed");
         close_socket(listen_fd);
         return INVALID_SOCKET;
@@ -850,22 +865,6 @@ bool send_redirect_to_https(socket_t socket, SSL* ssl, bool is_tls, const char* 
     }
 
     return client_send_all(socket, ssl, is_tls, response, (size_t)written);
-}
-
-bool strings_equal_ignore_case(const char* left, const char* right) {
-    if (!left || !right) {
-        return false;
-    }
-
-    while (*left && *right) {
-        if (tolower((unsigned char)*left) != tolower((unsigned char)*right)) {
-            return false;
-        }
-        left++;
-        right++;
-    }
-
-    return *left == '\0' && *right == '\0';
 }
 
 bool rule_has_tls_identity(const ProxyRule* rule) {
@@ -981,8 +980,19 @@ const TlsContextEntry* find_tls_entry(const TlsState* tls_state, const char* hos
         return NULL;
     }
 
+    char host_lower[HOST_BUFFER_SIZE];
+    size_t host_len = strlen(host);
+    if (host_len == 0 || host_len >= sizeof(host_lower)) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < host_len; i++) {
+        host_lower[i] = (char)tolower((unsigned char)host[i]);
+    }
+    host_lower[host_len] = '\0';
+
     for (const TlsContextEntry* entry = tls_state->entries; entry != NULL; entry = entry->next) {
-        if (entry->rule && strings_equal_ignore_case(entry->rule->entry_domain, host)) {
+        if (entry->rule && entry->rule->entry_domain_lower && strcmp(entry->rule->entry_domain_lower, host_lower) == 0) {
             return entry;
         }
     }
@@ -1075,4 +1085,70 @@ const BackendEntry* backend_cache_find(const BackendCache* cache, const ProxyRul
     }
 
     return NULL;
+}
+
+bool tune_socket(socket_t socket, bool is_listener) {
+    int enabled = 1;
+    bool success = true;
+
+    if (is_listener) {
+        if (setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&enabled, sizeof(enabled)) != 0) {
+            success = false;
+        }
+#if defined(SO_REUSEPORT)
+        (void)setsockopt(socket, SOL_SOCKET, SO_REUSEPORT, (const char*)&enabled, sizeof(enabled));
+#endif
+#if defined(__FreeBSD__) && defined(SO_REUSEPORT_LB)
+        // FreeBSD load-balancing.
+        (void)setsockopt(socket, SOL_SOCKET, SO_REUSEPORT_LB, (const char*)&enabled, sizeof(enabled));
+#endif
+#if defined(TCP_FASTOPEN)
+    int fastopen_queue = 256;
+    (void)setsockopt(socket, IPPROTO_TCP, TCP_FASTOPEN, (const char*)&fastopen_queue, sizeof(fastopen_queue));
+#endif
+    }
+
+#if defined(SO_NOSIGPIPE)
+    // FreeBSD SO_NOSIGPIPE.
+    (void)setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, (const char*)&enabled, sizeof(enabled));
+#endif
+#if defined(TCP_NODELAY)
+    (void)setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, (const char*)&enabled, sizeof(enabled));
+#endif
+
+    return success;
+}
+
+socket_t accept_client_socket(socket_t listen_socket) {
+    socket_t client_socket = INVALID_SOCKET;
+
+#if defined(__FreeBSD__) && defined(SOCK_CLOEXEC)
+    client_socket = accept4(listen_socket, NULL, NULL, SOCK_CLOEXEC);
+    if (client_socket != INVALID_SOCKET) {
+        (void)tune_socket(client_socket, false);
+        return client_socket;
+    }
+
+    if (errno != ENOSYS && errno != EINVAL) {
+        return INVALID_SOCKET;
+    }
+#endif
+
+    client_socket = accept(listen_socket, NULL, NULL);
+    if (client_socket != INVALID_SOCKET) {
+        (void)tune_socket(client_socket, false);
+    }
+    return client_socket;
+}
+
+int socket_send(socket_t socket, const char* data, size_t length) {
+#if defined(_WIN32)
+    return send(socket, data, (int)length, 0);
+#else
+#if defined(MSG_NOSIGNAL)
+    return (int)send(socket, data, length, MSG_NOSIGNAL);
+#else
+    return (int)send(socket, data, length, 0);
+#endif
+#endif
 }

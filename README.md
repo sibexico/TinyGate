@@ -7,7 +7,7 @@ TinyGate supports TLS certificates, SNI-based certificate selection, and optiona
 * `listen_ip`: IP for listening (`0.0.0.0` for all interfaces).
 * `listen_port`: Port for listening.
 * `listen_ssl_port`: Port for listening HTTPS. Set `0` to disable HTTPS.
-* `worker_threads`: The number of worker threads in the thread pool.
+* `worker_threads`: The number of worker threads in the thread pool. By default TinyGate uses all of the CPU cores.
 
 * `[your.domain.com]`: Targeted host.
 * `endpoint`: Backend target in `host:port` format (example: `127.0.0.1:8080`).
@@ -73,11 +73,16 @@ If you run TinyGate in other way (Windows service, Docker, manual process), repl
 ## Compilation
 
 ### Linux
-```Bash
-gcc -std=c23 -Wall -Wextra -pedantic main.c config.c -o tinygate -pthread -lssl -lcrypto
+```bash
+gcc -std=c23 -O3 -flto -pipe -Wall -Wextra -pedantic main.c config.c -o tinygate -pthread -lssl -lcrypto
+```
+
+### FreeBSD
+```bash
+gcc14 -std=c23 -O3 -flto -pipe -Wall -Wextra -pedantic main.c config.c -o tinygate -pthread -lssl -lcrypto
 ```
 
 ### Windows
-```Bash
-gcc -std=c23 -Wall -Wextra -pedantic main.c config.c -o tinygate.exe -pthread -lws2_32 -lssl -lcrypto
+```bash
+gcc -std=c23 -O3 -flto -pipe -Wall -Wextra -pedantic main.c config.c -o tinygate.exe -pthread -lws2_32 -lssl -lcrypto
 ```

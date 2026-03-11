@@ -11,6 +11,7 @@
 
 typedef struct ProxyRule {
     char* entry_domain;
+    char* entry_domain_lower;
     char* backend_host;
     int backend_port;
     char* tls_cert_file;
