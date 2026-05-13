@@ -5,8 +5,8 @@ Summary:        TinyGate reverse proxy
 
 License:        MIT
 URL:            https://github.com/sibexico/tinygate
-Source0:        tinygate-__VERSION__-linux-x86_64.tar.gz
-BuildArch:      x86_64
+Source0:        tinygate-__VERSION__-linux-__SOURCE_ARCH__.tar.gz
+BuildArch:      __RPM_ARCH__
 Requires:       openssl-libs
 
 %description

@@ -29,7 +29,7 @@ jobs:
       - name: Build binary
         run: |
           set -euo pipefail
-          gcc -std=c23 -O3 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate -pthread -lssl -lcrypto
+          gcc -std=c2x -O3 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate -pthread -lssl -lcrypto
 
           mkdir -p out/linux-x86_64
           cp tinygate README.md LICENSE out/linux-x86_64/
@@ -47,7 +47,9 @@ jobs:
           cp README.md pkg/deb/usr/local/share/doc/tinygate/README.md
           cp LICENSE pkg/deb/usr/local/share/doc/tinygate/LICENSE
 
-          sed "s/__VERSION__/${VERSION}/g" distrib/deb/control.in > pkg/deb/DEBIAN/control
+          sed -e "s/__VERSION__/${VERSION}/g" \
+              -e "s/__DEB_ARCH__/amd64/g" \
+              distrib/deb/control.in > pkg/deb/DEBIAN/control
           dpkg-deb --build pkg/deb "tinygate-${VERSION}-linux-x86_64.deb"
 
       - name: Build rpm package
@@ -56,7 +58,10 @@ jobs:
 
           mkdir -p rpmbuild/SOURCES rpmbuild/SPECS rpmbuild/BUILD rpmbuild/RPMS rpmbuild/SRPMS
           cp "tinygate-${VERSION}-linux-x86_64.tar.gz" rpmbuild/SOURCES/
-          sed "s/__VERSION__/${VERSION}/g" distrib/rpm/tinygate.spec.in > rpmbuild/SPECS/tinygate.spec
+          sed -e "s/__VERSION__/${VERSION}/g" \
+              -e "s/__SOURCE_ARCH__/x86_64/g" \
+              -e "s/__RPM_ARCH__/x86_64/g" \
+              distrib/rpm/tinygate.spec.in > rpmbuild/SPECS/tinygate.spec
 
           rpmbuild --define "_topdir ${PWD}/rpmbuild" -bb rpmbuild/SPECS/tinygate.spec
           cp rpmbuild/RPMS/x86_64/*.rpm "tinygate-${VERSION}-linux-x86_64.rpm"
@@ -82,23 +87,57 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev
+          sudo apt-get install -y build-essential libssl-dev rpm dpkg-dev
 
       - name: Build binary
         run: |
           set -euo pipefail
-          gcc -std=c23 -O3 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate -pthread -lssl -lcrypto
+          gcc -std=c2x -O3 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate -pthread -lssl -lcrypto
 
           mkdir -p out/linux-arm64
           cp tinygate README.md LICENSE out/linux-arm64/
           tar -C out/linux-arm64 -czf "tinygate-${VERSION}-linux-arm64.tar.gz" tinygate README.md LICENSE
+
+      - name: Build deb package
+        run: |
+          set -euo pipefail
+
+          mkdir -p pkg/deb/DEBIAN
+          mkdir -p pkg/deb/usr/local/bin
+          mkdir -p pkg/deb/usr/local/share/doc/tinygate
+
+          cp tinygate pkg/deb/usr/local/bin/tinygate
+          cp README.md pkg/deb/usr/local/share/doc/tinygate/README.md
+          cp LICENSE pkg/deb/usr/local/share/doc/tinygate/LICENSE
+
+          sed -e "s/__VERSION__/${VERSION}/g" \
+              -e "s/__DEB_ARCH__/arm64/g" \
+              distrib/deb/control.in > pkg/deb/DEBIAN/control
+          dpkg-deb --build pkg/deb "tinygate-${VERSION}-linux-arm64.deb"
+
+      - name: Build rpm package
+        run: |
+          set -euo pipefail
+
+          mkdir -p rpmbuild/SOURCES rpmbuild/SPECS rpmbuild/BUILD rpmbuild/RPMS rpmbuild/SRPMS
+          cp "tinygate-${VERSION}-linux-arm64.tar.gz" rpmbuild/SOURCES/
+          sed -e "s/__VERSION__/${VERSION}/g" \
+              -e "s/__SOURCE_ARCH__/arm64/g" \
+              -e "s/__RPM_ARCH__/aarch64/g" \
+              distrib/rpm/tinygate.spec.in > rpmbuild/SPECS/tinygate.spec
+
+          rpmbuild --define "_topdir ${PWD}/rpmbuild" -bb rpmbuild/SPECS/tinygate.spec
+          cp rpmbuild/RPMS/aarch64/*.rpm "tinygate-${VERSION}-linux-arm64.rpm"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: release-linux-arm64
           if-no-files-found: error
-          path: tinygate-*-linux-arm64.tar.gz
+          path: |
+            tinygate-*-linux-arm64.tar.gz
+            tinygate-*-linux-arm64.deb
+            tinygate-*-linux-arm64.rpm
 
   build-windows-x86_64:
     runs-on: windows-latest
@@ -124,7 +163,7 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
 
-          gcc -std=c23 -O2 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate.exe -lws2_32 -lssl -lcrypto
+          gcc -std=c2x -O2 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate.exe -lws2_32 -lssl -lcrypto
 
           mkdir -p out/windows-x86_64
           cp tinygate.exe README.md LICENSE out/windows-x86_64/
@@ -161,7 +200,7 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
 
-          clang -std=c23 -O2 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate.exe -lws2_32 -lssl -lcrypto
+          clang -std=c2x -O2 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate.exe -lws2_32 -lssl -lcrypto
 
           mkdir -p out/windows-arm64
           cp tinygate.exe README.md LICENSE out/windows-arm64/
@@ -190,9 +229,14 @@ jobs:
           copyback: true
           run: |
             set -eu
+            VERSION='${{ env.VERSION }}'
+            if [ -z "$VERSION" ]; then
+              echo "VERSION is empty in FreeBSD VM step"
+              exit 1
+            fi
 
             pkg install -y openssl
-            cc -std=c23 -O3 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate -pthread -lssl -lcrypto
+            cc -std=c2x -O3 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate -pthread -lssl -lcrypto
 
             mkdir -p out/freebsd-x86_64
             cp tinygate README.md LICENSE out/freebsd-x86_64/
@@ -246,8 +290,8 @@ jobs:
         run: |
           set -euo pipefail
           file_count="$(find release-assets -maxdepth 1 -type f | wc -l)"
-          if [ "$file_count" -ne 8 ]; then
-            echo "Expected 8 release files, got $file_count"
+          if [ "$file_count" -ne 10 ]; then
+            echo "Expected 10 release files, got $file_count"
             find release-assets -maxdepth 1 -type f -print
             exit 1
           fi
