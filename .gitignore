@@ -50,3 +50,12 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# TinyGate local build outputs
+build/
+out/
+pkg/
+rpmbuild/
+tinygate
+tinygate_tests
+tinygate_test_config.ini

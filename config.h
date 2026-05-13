@@ -24,7 +24,12 @@ typedef struct Config {
     char* listen_ip;
     int listen_port;
     int listen_ssl_port;
-    int worker_threads;
+    int max_events;
+    int max_connections;
+    int io_buffer_size;
+    int host_buffer_size;
+    int target_buffer_size;
+    int redirect_buffer_size;
     ProxyRule* rules;
 } Config;
 

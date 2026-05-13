@@ -1,160 +1,89 @@
+#if defined(__linux__)
+    #define TG_OS_LINUX 1
+#elif defined(__FreeBSD__)
+    #define TG_OS_FREEBSD 1
+#elif defined(_WIN32)
+    #define TG_OS_WINDOWS 1
+#else
+    #error TinyGate supports Linux, FreeBSD, and Windows.
+#endif
+
+#include <ctype.h>
+#include <limits.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
-#include <stdint.h>
-#include <errno.h>
 
-
-//HERE BE DRAGONS!!! In name of all the gods, never touch this crossplatform defines...
-#if !defined(TG_FORCE_PTHREAD)
-    #define TG_FORCE_PTHREAD 0
-#endif
-
-#if defined(__has_include) 
-    #if __has_include(<threads.h>) && !defined(__STDC_NO_THREADS__) && !TG_FORCE_PTHREAD && !(defined(__FreeBSD__) && defined(__GNUC__) && !defined(__clang__))
-        #include <threads.h>
-        #define TG_HAS_C23_THREADS 1
-    #else
-        #include <pthread.h>
-        #define TG_HAS_C23_THREADS 0
-    #endif
-#else
-    #include <pthread.h>
-    #define TG_HAS_C23_THREADS 0
-#endif
-
-#if defined(__has_include)
-    #if __has_include(<openssl/ssl.h>) && __has_include(<openssl/err.h>)
-        #include <openssl/ssl.h>
-        #include <openssl/err.h>
-        #define TG_HAS_OPENSSL 1
-    #else
-        #define TG_HAS_OPENSSL 0
-    #endif
-#else
-    #define TG_HAS_OPENSSL 0
-#endif
-
-#include "config.h"
-
-#if !TG_HAS_OPENSSL
-typedef struct ssl_st SSL;
-typedef struct ssl_ctx_st SSL_CTX;
-#endif
-
-#if !TG_HAS_C23_THREADS
-typedef pthread_t thrd_t;
-typedef pthread_mutex_t mtx_t;
-typedef pthread_cond_t cnd_t;
-
-typedef struct {
-    int (*func)(void*);
-    void* arg;
-} ThreadStart;
-
-enum { thrd_success = 0 };
-
-static void* pthread_start(void* raw_arg) {
-    ThreadStart* start = (ThreadStart*)raw_arg;
-    int result = start->func(start->arg);
-    free(start);
-    return (void*)(intptr_t)result;
-}
-
-static int thrd_create(thrd_t* thread, int (*func)(void*), void* arg) {
-    ThreadStart* start = malloc(sizeof(*start));
-    if (!start) {
-        return -1;
-    }
-    start->func = func;
-    start->arg = arg;
-    int status = pthread_create(thread, NULL, pthread_start, start);
-    if (status != 0) {
-        free(start);
-    }
-    return status;
-}
-
-static int thrd_join(thrd_t thread, int* result) {
-    void* join_result = NULL;
-    int status = pthread_join(thread, &join_result);
-    if (status == 0 && result) {
-        *result = (int)(intptr_t)join_result;
-    }
-    return status;
-}
-
-static int mtx_init(mtx_t* mutex, int type) {
-    (void)type;
-    return pthread_mutex_init(mutex, NULL);
-}
-
-static int mtx_lock(mtx_t* mutex) {
-    return pthread_mutex_lock(mutex);
-}
-
-static int mtx_unlock(mtx_t* mutex) {
-    return pthread_mutex_unlock(mutex);
-}
-
-static int cnd_init(cnd_t* cond) {
-    return pthread_cond_init(cond, NULL);
-}
-
-static int cnd_wait(cnd_t* cond, mtx_t* mutex) {
-    return pthread_cond_wait(cond, mutex);
-}
-
-static int cnd_signal(cnd_t* cond) {
-    return pthread_cond_signal(cond);
-}
-
-enum { mtx_plain = 0 };
-#endif
-
-#ifdef _WIN32
+#if TG_OS_WINDOWS
     #include <winsock2.h>
     #include <ws2tcpip.h>
-    typedef SOCKET socket_t;
-    typedef int io_count_t;
-    #define close_socket(s) closesocket(s)
+    #include <windows.h>
 #else
-    #include <unistd.h>
-    #include <sys/select.h>
-    #include <sys/socket.h>
+    #include <errno.h>
+    #include <fcntl.h>
+    #include <netdb.h>
     #include <netinet/in.h>
     #include <netinet/tcp.h>
-    #include <arpa/inet.h>
-    #include <netdb.h>
-    typedef int socket_t;
-    typedef ssize_t io_count_t;
-    #define close_socket(s) close(s)
-    #define INVALID_SOCKET -1
+    #include <pthread.h>
+    #include <signal.h>
+    #include <sys/select.h>
+    #include <sys/socket.h>
+    #include <sys/types.h>
+    #include <unistd.h>
+    #if TG_OS_LINUX
+        #include <sys/epoll.h>
+        #include <sys/resource.h>
+    #endif
+    #if TG_OS_FREEBSD
+        #include <sys/event.h>
+        #include <sys/resource.h>
+    #endif
 #endif
 
-#define BUFFER_SIZE 16384
-#define TASK_QUEUE_SIZE 256
-#define HOST_BUFFER_SIZE 256
-#define TARGET_BUFFER_SIZE 2048
-#define REDIRECT_BUFFER_SIZE 3072
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 
-static const char RESPONSE_BAD_REQUEST[] = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-static const char RESPONSE_BAD_GATEWAY[] = "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+#include "config.h"
+#include "http_parser.h"
+
+#if TG_OS_WINDOWS
+typedef SOCKET socket_t;
+typedef int io_count_t;
+#define TG_INVALID_SOCKET INVALID_SOCKET
+#define TG_NO_ACCEPTED_SOCKET ((SOCKET)(~(uintptr_t)1))
+#else
+typedef int socket_t;
+typedef ssize_t io_count_t;
+#define TG_INVALID_SOCKET (-1)
+#define TG_NO_ACCEPTED_SOCKET (-2)
+#endif
 
 typedef struct {
     socket_t client_socket;
     bool is_tls;
 } Task;
 
+#if TG_OS_WINDOWS
+typedef HANDLE thread_handle_t;
+typedef CRITICAL_SECTION queue_mutex_t;
+typedef CONDITION_VARIABLE queue_cond_t;
+#else
+typedef pthread_t thread_handle_t;
+typedef pthread_mutex_t queue_mutex_t;
+typedef pthread_cond_t queue_cond_t;
+#endif
+
 typedef struct {
-    Task queue[TASK_QUEUE_SIZE];
+    Task* items;
+    int capacity;
     int head;
     int tail;
     int count;
-    mtx_t mutex;
-    cnd_t not_empty;
-    cnd_t not_full;
+    queue_mutex_t mutex;
+    queue_cond_t not_empty;
+    queue_cond_t not_full;
 } TaskQueue;
 
 typedef struct TlsContextEntry {
@@ -185,42 +114,496 @@ typedef struct {
 } BackendCache;
 
 typedef struct {
+    char* storage;
+    char* io_buffer;
+    char* host_buffer;
+    char* target_buffer;
+    char* redirect_buffer;
+    size_t io_buffer_size;
+    size_t host_buffer_size;
+    size_t target_buffer_size;
+    size_t redirect_buffer_size;
+} WorkerBuffers;
+
+typedef struct {
     const Config* config;
     const TlsState* tls_state;
     const BackendCache* backend_cache;
+    TaskQueue* task_queue;
 } WorkerContext;
 
-void queue_init(TaskQueue* q);
-void queue_push(TaskQueue* q, Task task);
-Task queue_pop(TaskQueue* q);
-int worker_thread(void* arg);
-void process_connection(Task task, const Config* config, const TlsState* tls_state, const BackendCache* backend_cache);
-void relay_data(socket_t client_socket, SSL* client_ssl, bool client_is_tls, socket_t server_socket);
-bool try_parse_host(const char* buffer, char* out_host, size_t out_size);
-bool try_parse_request_target(const char* buffer, char* out_target, size_t out_size);
-bool send_all(socket_t socket, const char* data, size_t length);
-bool client_send_all(socket_t socket, SSL* ssl, bool is_tls, const char* data, size_t length);
-io_count_t client_recv(socket_t socket, SSL* ssl, bool is_tls, char* buffer, size_t length);
-socket_t create_listen_socket(const char* listen_ip, int listen_port);
-void close_client(socket_t socket, SSL* ssl, bool is_tls);
-bool send_redirect_to_https(socket_t socket, SSL* ssl, bool is_tls, const char* host, const char* target, int ssl_port);
-bool rule_has_tls_identity(const ProxyRule* rule);
-bool tls_state_init(TlsState* tls_state, const Config* config);
-void tls_state_cleanup(TlsState* tls_state);
-const TlsContextEntry* find_tls_entry(const TlsState* tls_state, const char* host);
-bool tls_state_has_host(const TlsState* tls_state, const char* host);
-bool backend_cache_init(BackendCache* cache, const Config* config);
-void backend_cache_cleanup(BackendCache* cache);
-const BackendEntry* backend_cache_find(const BackendCache* cache, const ProxyRule* rule);
-bool tune_socket(socket_t socket, bool is_listener);
-socket_t accept_client_socket(socket_t listen_socket);
-int socket_send(socket_t socket, const char* data, size_t length);
+typedef struct {
+    socket_t listen_http;
+    socket_t listen_https;
+#if TG_OS_LINUX
+    int epoll_fd;
+#elif TG_OS_FREEBSD
+    int kqueue_fd;
+#elif TG_OS_WINDOWS
+    WSAPOLLFD poll_fds[2];
+    ULONG poll_count;
+#endif
+} AcceptLoop;
 
-TaskQueue task_queue;
+static const char RESPONSE_BAD_REQUEST[] = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+static const char RESPONSE_BAD_GATEWAY[] = "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
 
-#if TG_HAS_OPENSSL
+static int clamp_int(int value, int min_value, int max_value);
+static int detect_worker_threads(void);
+static void apply_fd_limit(int max_connections);
+static bool socket_runtime_init(void);
+static void socket_runtime_cleanup(void);
+
+static bool queue_init(TaskQueue* queue, int capacity);
+static void queue_push(TaskQueue* queue, Task task);
+static Task queue_pop(TaskQueue* queue);
+
+static bool worker_buffers_init(WorkerBuffers* buffers, const Config* config);
+static void worker_buffers_cleanup(WorkerBuffers* buffers);
+
+static bool accept_loop_init(AcceptLoop* accept_loop, socket_t listen_http, socket_t listen_https);
+static bool accept_loop_wait(AcceptLoop* accept_loop, bool* out_http_ready, bool* out_https_ready);
+static void accept_loop_cleanup(AcceptLoop* accept_loop);
+
+static void process_connection(Task task, const Config* config, const TlsState* tls_state, const BackendCache* backend_cache, WorkerBuffers* buffers);
+static void relay_data(socket_t client_socket, SSL* client_ssl, bool client_is_tls, socket_t server_socket, char* io_buffer, size_t io_buffer_size);
+static bool send_redirect_to_https(
+    socket_t socket_fd,
+    SSL* ssl,
+    bool is_tls,
+    const char* host,
+    const char* target,
+    int ssl_port,
+    char* response_buffer,
+    size_t response_buffer_size
+);
+
+static bool send_all(socket_t socket_fd, const char* data, size_t length);
+static bool client_send_all(socket_t socket_fd, SSL* ssl, bool is_tls, const char* data, size_t length);
+static io_count_t client_recv(socket_t socket_fd, SSL* ssl, bool is_tls, char* buffer, size_t length);
+
+static bool set_nonblocking(socket_t socket_fd);
+static bool tune_socket(socket_t socket_fd, bool is_listener);
+static int socket_send(socket_t socket_fd, const char* data, size_t length);
+static socket_t create_listen_socket(const char* listen_ip, int listen_port, int backlog);
+static socket_t accept_client_socket(socket_t listen_socket);
+static void close_socket_if_valid(socket_t socket_fd);
+static void close_client(socket_t socket_fd, SSL* ssl, bool is_tls);
+
+static bool rule_has_tls_identity(const ProxyRule* rule);
+static bool tls_state_init(TlsState* tls_state, const Config* config);
+static void tls_state_cleanup(TlsState* tls_state);
+static const TlsContextEntry* find_tls_entry(const TlsState* tls_state, const char* host);
+static bool tls_state_has_host(const TlsState* tls_state, const char* host);
+
+static bool backend_cache_init(BackendCache* cache, const Config* config);
+static void backend_cache_cleanup(BackendCache* cache);
+static const BackendEntry* backend_cache_find(const BackendCache* cache, const ProxyRule* rule);
+
+static int net_last_error(void);
+static bool net_error_is_would_block(int error_code);
+static bool net_error_is_interrupted(int error_code);
+static int length_to_int(size_t length);
+
+#if TG_OS_WINDOWS
+static DWORD WINAPI worker_thread_start(void* raw_context);
+#else
+static void* worker_thread_start(void* raw_context);
+#endif
+static int tls_sni_callback(SSL* ssl, int* alert, void* arg);
+
+static int clamp_int(int value, int min_value, int max_value) {
+    if (value < min_value) {
+        return min_value;
+    }
+    if (value > max_value) {
+        return max_value;
+    }
+    return value;
+}
+
+static int detect_worker_threads(void) {
+    // Use CPU core count as default worker count.
+#if TG_OS_WINDOWS
+    DWORD cores = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    if (cores > 0 && cores <= (DWORD)INT_MAX) {
+        return (int)cores;
+    }
+#else
+    long cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (cores > 0 && cores <= INT_MAX) {
+        return (int)cores;
+    }
+#endif
+    return 2;
+}
+
+static void apply_fd_limit(int max_connections) {
+#if TG_OS_WINDOWS
+    (void)max_connections;
+#else
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+        return;
+    }
+
+    rlim_t desired = (rlim_t)(max_connections + 128);
+    if (desired > limit.rlim_max) {
+        desired = limit.rlim_max;
+    }
+    if (desired <= limit.rlim_cur) {
+        return;
+    }
+
+    limit.rlim_cur = desired;
+    (void)setrlimit(RLIMIT_NOFILE, &limit);
+#endif
+}
+
+static bool socket_runtime_init(void) {
+#if TG_OS_WINDOWS
+    WSADATA data;
+    return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+#else
+    return true;
+#endif
+}
+
+static void socket_runtime_cleanup(void) {
+#if TG_OS_WINDOWS
+    WSACleanup();
+#endif
+}
+
+static bool queue_init(TaskQueue* queue, int capacity) {
+    // Ring queue used by accept thread and worker threads.
+    memset(queue, 0, sizeof(*queue));
+
+    queue->items = calloc((size_t)capacity, sizeof(*queue->items));
+    if (!queue->items) {
+        return false;
+    }
+
+    queue->capacity = capacity;
+
+#if TG_OS_WINDOWS
+    InitializeCriticalSection(&queue->mutex);
+    InitializeConditionVariable(&queue->not_empty);
+    InitializeConditionVariable(&queue->not_full);
+    return true;
+#else
+    if (pthread_mutex_init(&queue->mutex, NULL) != 0) {
+        free(queue->items);
+        return false;
+    }
+
+    if (pthread_cond_init(&queue->not_empty, NULL) != 0) {
+        pthread_mutex_destroy(&queue->mutex);
+        free(queue->items);
+        return false;
+    }
+
+    if (pthread_cond_init(&queue->not_full, NULL) != 0) {
+        pthread_cond_destroy(&queue->not_empty);
+        pthread_mutex_destroy(&queue->mutex);
+        free(queue->items);
+        return false;
+    }
+
+    return true;
+#endif
+}
+
+static void queue_push(TaskQueue* queue, Task task) {
+#if TG_OS_WINDOWS
+    EnterCriticalSection(&queue->mutex);
+    while (queue->count == queue->capacity) {
+        SleepConditionVariableCS(&queue->not_full, &queue->mutex, INFINITE);
+    }
+
+    queue->items[queue->tail] = task;
+    queue->tail = (queue->tail + 1) % queue->capacity;
+    queue->count++;
+
+    WakeConditionVariable(&queue->not_empty);
+    LeaveCriticalSection(&queue->mutex);
+#else
+    pthread_mutex_lock(&queue->mutex);
+    while (queue->count == queue->capacity) {
+        pthread_cond_wait(&queue->not_full, &queue->mutex);
+    }
+
+    queue->items[queue->tail] = task;
+    queue->tail = (queue->tail + 1) % queue->capacity;
+    queue->count++;
+
+    pthread_cond_signal(&queue->not_empty);
+    pthread_mutex_unlock(&queue->mutex);
+#endif
+}
+
+static Task queue_pop(TaskQueue* queue) {
+#if TG_OS_WINDOWS
+    EnterCriticalSection(&queue->mutex);
+    while (queue->count == 0) {
+        SleepConditionVariableCS(&queue->not_empty, &queue->mutex, INFINITE);
+    }
+
+    Task task = queue->items[queue->head];
+    queue->head = (queue->head + 1) % queue->capacity;
+    queue->count--;
+
+    WakeConditionVariable(&queue->not_full);
+    LeaveCriticalSection(&queue->mutex);
+    return task;
+#else
+    pthread_mutex_lock(&queue->mutex);
+    while (queue->count == 0) {
+        pthread_cond_wait(&queue->not_empty, &queue->mutex);
+    }
+
+    Task task = queue->items[queue->head];
+    queue->head = (queue->head + 1) % queue->capacity;
+    queue->count--;
+
+    pthread_cond_signal(&queue->not_full);
+    pthread_mutex_unlock(&queue->mutex);
+    return task;
+#endif
+}
+
+static bool worker_buffers_init(WorkerBuffers* buffers, const Config* config) {
+    // Allocate one shared block per worker to avoid per-request allocs.
+    memset(buffers, 0, sizeof(*buffers));
+
+    buffers->io_buffer_size = (size_t)config->io_buffer_size;
+    buffers->host_buffer_size = (size_t)config->host_buffer_size;
+    buffers->target_buffer_size = (size_t)config->target_buffer_size;
+    buffers->redirect_buffer_size = (size_t)config->redirect_buffer_size;
+
+    size_t total_size = buffers->io_buffer_size +
+                        buffers->host_buffer_size +
+                        buffers->target_buffer_size +
+                        buffers->redirect_buffer_size;
+
+    buffers->storage = malloc(total_size);
+    if (!buffers->storage) {
+        return false;
+    }
+
+    char* cursor = buffers->storage;
+    buffers->io_buffer = cursor;
+    cursor += buffers->io_buffer_size;
+    buffers->host_buffer = cursor;
+    cursor += buffers->host_buffer_size;
+    buffers->target_buffer = cursor;
+    cursor += buffers->target_buffer_size;
+    buffers->redirect_buffer = cursor;
+    return true;
+}
+
+static void worker_buffers_cleanup(WorkerBuffers* buffers) {
+    if (!buffers) {
+        return;
+    }
+
+    free(buffers->storage);
+    memset(buffers, 0, sizeof(*buffers));
+}
+
+static bool accept_loop_init(AcceptLoop* accept_loop, socket_t listen_http, socket_t listen_https) {
+    // Pick the native event API for this OS.
+    memset(accept_loop, 0, sizeof(*accept_loop));
+    accept_loop->listen_http = listen_http;
+    accept_loop->listen_https = listen_https;
+
+#if TG_OS_LINUX
+    accept_loop->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (accept_loop->epoll_fd < 0) {
+        perror("epoll_create1");
+        return false;
+    }
+
+    struct epoll_event event = {0};
+    event.events = EPOLLIN;
+    event.data.u32 = 1;
+    if (epoll_ctl(accept_loop->epoll_fd, EPOLL_CTL_ADD, listen_http, &event) != 0) {
+        perror("epoll_ctl listen_http");
+        close(accept_loop->epoll_fd);
+        return false;
+    }
+
+    if (listen_https != TG_INVALID_SOCKET) {
+        event.events = EPOLLIN;
+        event.data.u32 = 2;
+        if (epoll_ctl(accept_loop->epoll_fd, EPOLL_CTL_ADD, listen_https, &event) != 0) {
+            perror("epoll_ctl listen_https");
+            close(accept_loop->epoll_fd);
+            return false;
+        }
+    }
+
+    return true;
+#elif TG_OS_FREEBSD
+    accept_loop->kqueue_fd = kqueue();
+    if (accept_loop->kqueue_fd < 0) {
+        perror("kqueue");
+        return false;
+    }
+
+    struct kevent changes[2];
+    int change_count = 0;
+
+    EV_SET(&changes[change_count++], listen_http, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, (void*)(uintptr_t)1);
+    if (listen_https != TG_INVALID_SOCKET) {
+        EV_SET(&changes[change_count++], listen_https, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, (void*)(uintptr_t)2);
+    }
+
+    if (kevent(accept_loop->kqueue_fd, changes, change_count, NULL, 0, NULL) < 0) {
+        perror("kevent register");
+        close(accept_loop->kqueue_fd);
+        return false;
+    }
+
+    return true;
+#else
+    accept_loop->poll_count = 0;
+
+    accept_loop->poll_fds[accept_loop->poll_count].fd = listen_http;
+    accept_loop->poll_fds[accept_loop->poll_count].events = POLLRDNORM;
+    accept_loop->poll_fds[accept_loop->poll_count].revents = 0;
+    accept_loop->poll_count++;
+
+    if (listen_https != TG_INVALID_SOCKET) {
+        accept_loop->poll_fds[accept_loop->poll_count].fd = listen_https;
+        accept_loop->poll_fds[accept_loop->poll_count].events = POLLRDNORM;
+        accept_loop->poll_fds[accept_loop->poll_count].revents = 0;
+        accept_loop->poll_count++;
+    }
+
+    return true;
+#endif
+}
+
+static bool accept_loop_wait(AcceptLoop* accept_loop, bool* out_http_ready, bool* out_https_ready) {
+    // Wait until any listener has new clients.
+    *out_http_ready = false;
+    *out_https_ready = false;
+
+#if TG_OS_LINUX
+    struct epoll_event events[4];
+    int ready = epoll_wait(accept_loop->epoll_fd, events, 4, -1);
+    if (ready < 0) {
+        if (net_error_is_interrupted(net_last_error())) {
+            return true;
+        }
+        perror("epoll_wait");
+        return false;
+    }
+
+    for (int i = 0; i < ready; i++) {
+        if (events[i].data.u32 == 1) {
+            *out_http_ready = true;
+        } else if (events[i].data.u32 == 2) {
+            *out_https_ready = true;
+        }
+    }
+
+    return true;
+#elif TG_OS_FREEBSD
+    struct kevent events[4];
+    int ready = kevent(accept_loop->kqueue_fd, NULL, 0, events, 4, NULL);
+    if (ready < 0) {
+        if (net_error_is_interrupted(net_last_error())) {
+            return true;
+        }
+        perror("kevent wait");
+        return false;
+    }
+
+    for (int i = 0; i < ready; i++) {
+        uintptr_t marker = (uintptr_t)events[i].udata;
+        if (marker == 1) {
+            *out_http_ready = true;
+        } else if (marker == 2) {
+            *out_https_ready = true;
+        }
+    }
+
+    return true;
+#else
+    int ready = WSAPoll(accept_loop->poll_fds, accept_loop->poll_count, -1);
+    if (ready == SOCKET_ERROR) {
+        int error_code = net_last_error();
+        if (net_error_is_interrupted(error_code)) {
+            return true;
+        }
+        fprintf(stderr, "WSAPoll failed: %d\n", error_code);
+        return false;
+    }
+
+    for (ULONG i = 0; i < accept_loop->poll_count; i++) {
+        short revents = accept_loop->poll_fds[i].revents;
+        if ((revents & POLLRDNORM) == 0 && (revents & POLLIN) == 0) {
+            continue;
+        }
+
+        if (accept_loop->poll_fds[i].fd == accept_loop->listen_http) {
+            *out_http_ready = true;
+        }
+        if (accept_loop->poll_fds[i].fd == accept_loop->listen_https) {
+            *out_https_ready = true;
+        }
+    }
+
+    return true;
+#endif
+}
+
+static void accept_loop_cleanup(AcceptLoop* accept_loop) {
+#if TG_OS_LINUX
+    close(accept_loop->epoll_fd);
+#elif TG_OS_FREEBSD
+    close(accept_loop->kqueue_fd);
+#else
+    (void)accept_loop;
+#endif
+}
+
+#if TG_OS_WINDOWS
+static DWORD WINAPI worker_thread_start(void* raw_context)
+#else
+static void* worker_thread_start(void* raw_context)
+#endif
+{
+    // Each worker keeps its own buffers and handles queued sockets.
+    const WorkerContext* context = (const WorkerContext*)raw_context;
+
+    WorkerBuffers buffers;
+    if (!worker_buffers_init(&buffers, context->config)) {
+#if TG_OS_WINDOWS
+        return 1;
+#else
+        return NULL;
+#endif
+    }
+
+    while (1) {
+        Task task = queue_pop(context->task_queue);
+        process_connection(task, context->config, context->tls_state, context->backend_cache, &buffers);
+    }
+
+    worker_buffers_cleanup(&buffers);
+#if TG_OS_WINDOWS
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
 static int tls_sni_callback(SSL* ssl, int* alert, void* arg) {
     (void)alert;
+
     const TlsState* tls_state = (const TlsState*)arg;
     const char* server_name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
     if (!tls_state || !server_name) {
@@ -234,44 +617,60 @@ static int tls_sni_callback(SSL* ssl, int* alert, void* arg) {
 
     return SSL_TLSEXT_ERR_OK;
 }
-#endif
 
 int main(int argc, char* argv[]) {
-#ifdef _WIN32
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        fprintf(stderr, "WSAStartup failed.\n");
+#if !TG_OS_WINDOWS
+    signal(SIGPIPE, SIG_IGN);
+#endif
+
+    // Startup flow: load config, init state, then start listeners.
+    if (!socket_runtime_init()) {
+        fprintf(stderr, "Failed to initialize socket runtime.\n");
         return EXIT_FAILURE;
     }
-#endif
 
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <path_to_config.ini>\n", argv[0]);
+        socket_runtime_cleanup();
         return EXIT_FAILURE;
     }
 
     Config* config = load_config(argv[1]);
     if (!config) {
         fprintf(stderr, "Failed to load configuration.\n");
+        socket_runtime_cleanup();
         return EXIT_FAILURE;
     }
+
+    config->max_events = clamp_int(config->max_events, 2, 32768);
+    config->max_connections = clamp_int(config->max_connections, 256, 200000);
+    config->io_buffer_size = clamp_int(config->io_buffer_size, 1024, 1048576);
+    config->host_buffer_size = clamp_int(config->host_buffer_size, 64, 4096);
+    config->target_buffer_size = clamp_int(config->target_buffer_size, 128, 32768);
+    config->redirect_buffer_size = clamp_int(config->redirect_buffer_size, 512, 65536);
 
     for (const ProxyRule* rule = config->rules; rule != NULL; rule = rule->next) {
         if (rule->force_ssl && config->listen_ssl_port <= 0) {
             fprintf(stderr, "force_ssl requires listen_ssl_port > 0 for domain %s\n", rule->entry_domain);
             free_config(config);
+            socket_runtime_cleanup();
             return EXIT_FAILURE;
         }
         if (rule->force_ssl && !rule_has_tls_identity(rule)) {
             fprintf(stderr, "force_ssl requires tls_cert_file and tls_key_file for domain %s\n", rule->entry_domain);
             free_config(config);
+            socket_runtime_cleanup();
             return EXIT_FAILURE;
         }
     }
 
+    int queue_capacity = clamp_int(config->max_connections / 2, 128, 16384);
+    apply_fd_limit(config->max_connections);
+
     TlsState tls_state;
     if (!tls_state_init(&tls_state, config)) {
         free_config(config);
+        socket_runtime_cleanup();
         return EXIT_FAILURE;
     }
 
@@ -279,104 +678,143 @@ int main(int argc, char* argv[]) {
     if (!backend_cache_init(&backend_cache, config)) {
         tls_state_cleanup(&tls_state);
         free_config(config);
+        socket_runtime_cleanup();
         return EXIT_FAILURE;
     }
 
-    socket_t listen_fd = create_listen_socket(config->listen_ip, config->listen_port);
-    if (listen_fd == INVALID_SOCKET) {
+    socket_t listen_http = create_listen_socket(config->listen_ip, config->listen_port, config->max_connections);
+    if (listen_http == TG_INVALID_SOCKET) {
         backend_cache_cleanup(&backend_cache);
         tls_state_cleanup(&tls_state);
         free_config(config);
+        socket_runtime_cleanup();
         return EXIT_FAILURE;
     }
 
-    socket_t listen_ssl_fd = INVALID_SOCKET;
+    socket_t listen_https = TG_INVALID_SOCKET;
     if (tls_state.enabled) {
         if (config->listen_ssl_port == config->listen_port) {
             fprintf(stderr, "listen_port and listen_ssl_port must be different\n");
-            close_socket(listen_fd);
+            close_socket_if_valid(listen_http);
             backend_cache_cleanup(&backend_cache);
             tls_state_cleanup(&tls_state);
             free_config(config);
+            socket_runtime_cleanup();
             return EXIT_FAILURE;
         }
 
-        listen_ssl_fd = create_listen_socket(config->listen_ip, config->listen_ssl_port);
-        if (listen_ssl_fd == INVALID_SOCKET) {
-            close_socket(listen_fd);
+        listen_https = create_listen_socket(config->listen_ip, config->listen_ssl_port, config->max_connections);
+        if (listen_https == TG_INVALID_SOCKET) {
+            close_socket_if_valid(listen_http);
             backend_cache_cleanup(&backend_cache);
             tls_state_cleanup(&tls_state);
             free_config(config);
+            socket_runtime_cleanup();
             return EXIT_FAILURE;
         }
     }
 
-    queue_init(&task_queue);
+    TaskQueue task_queue;
+    if (!queue_init(&task_queue, queue_capacity)) {
+        fprintf(stderr, "Failed to initialize task queue.\n");
+        close_socket_if_valid(listen_http);
+        close_socket_if_valid(listen_https);
+        backend_cache_cleanup(&backend_cache);
+        tls_state_cleanup(&tls_state);
+        free_config(config);
+        socket_runtime_cleanup();
+        return EXIT_FAILURE;
+    }
+
     WorkerContext worker_context = {
         .config = config,
         .tls_state = &tls_state,
         .backend_cache = &backend_cache,
+        .task_queue = &task_queue,
     };
 
-    thrd_t* threads = malloc(sizeof(*threads) * (size_t)config->worker_threads);
-    if (!threads) {
-        fprintf(stderr, "Failed to allocate worker thread list.\n");
-        close_socket(listen_fd);
-        if (listen_ssl_fd != INVALID_SOCKET) {
-            close_socket(listen_ssl_fd);
-        }
+    int worker_threads = clamp_int(detect_worker_threads(), 1, 256);
+    thread_handle_t* workers = calloc((size_t)worker_threads, sizeof(*workers));
+    if (!workers) {
+        fprintf(stderr, "Failed to allocate worker list.\n");
+        close_socket_if_valid(listen_http);
+        close_socket_if_valid(listen_https);
         backend_cache_cleanup(&backend_cache);
         tls_state_cleanup(&tls_state);
         free_config(config);
+        socket_runtime_cleanup();
         return EXIT_FAILURE;
     }
 
-    for (int i = 0; i < config->worker_threads; i++) {
-        if (thrd_create(&threads[i], worker_thread, &worker_context) != thrd_success) {
+    int started_threads = 0;
+    for (int i = 0; i < worker_threads; i++) {
+#if TG_OS_WINDOWS
+        HANDLE handle = CreateThread(NULL, 0, worker_thread_start, &worker_context, 0, NULL);
+        if (!handle) {
             fprintf(stderr, "Failed to create worker thread.\n");
-            free(threads);
-            close_socket(listen_fd);
-            if (listen_ssl_fd != INVALID_SOCKET) {
-                close_socket(listen_ssl_fd);
-            }
-            backend_cache_cleanup(&backend_cache);
-            tls_state_cleanup(&tls_state);
-            free_config(config);
-            return EXIT_FAILURE;
+            break;
         }
+        workers[i] = handle;
+#else
+        if (pthread_create(&workers[i], NULL, worker_thread_start, &worker_context) != 0) {
+            fprintf(stderr, "Failed to create worker thread.\n");
+            break;
+        }
+#endif
+        started_threads++;
+    }
+
+    if (started_threads != worker_threads) {
+#if TG_OS_WINDOWS
+        for (int i = 0; i < started_threads; i++) {
+            CloseHandle(workers[i]);
+        }
+#endif
+        free(workers);
+        close_socket_if_valid(listen_http);
+        close_socket_if_valid(listen_https);
+        backend_cache_cleanup(&backend_cache);
+        tls_state_cleanup(&tls_state);
+        free_config(config);
+        socket_runtime_cleanup();
+        return EXIT_FAILURE;
+    }
+
+    AcceptLoop accept_loop;
+    if (!accept_loop_init(&accept_loop, listen_http, listen_https)) {
+#if TG_OS_WINDOWS
+        for (int i = 0; i < started_threads; i++) {
+            CloseHandle(workers[i]);
+        }
+#endif
+        free(workers);
+        close_socket_if_valid(listen_http);
+        close_socket_if_valid(listen_https);
+        backend_cache_cleanup(&backend_cache);
+        tls_state_cleanup(&tls_state);
+        free_config(config);
+        socket_runtime_cleanup();
+        return EXIT_FAILURE;
     }
 
     while (1) {
-        if (!tls_state.enabled) {
-            socket_t client_socket = accept_client_socket(listen_fd);
-            if (client_socket == INVALID_SOCKET) {
-                perror("accept() failed");
-                continue;
-            }
-
-            Task task = {
-                .client_socket = client_socket,
-                .is_tls = false,
-            };
-            queue_push(&task_queue, task);
-            continue;
+        // Main thread only accepts sockets and pushes tasks to queue.
+        bool http_ready = false;
+        bool https_ready = false;
+        if (!accept_loop_wait(&accept_loop, &http_ready, &https_ready)) {
+            break;
         }
 
-        fd_set read_fds;
-        FD_ZERO(&read_fds);
-        FD_SET(listen_fd, &read_fds);
-        FD_SET(listen_ssl_fd, &read_fds);
+        if (http_ready) {
+            while (1) {
+                socket_t client_socket = accept_client_socket(listen_http);
+                if (client_socket == TG_NO_ACCEPTED_SOCKET) {
+                    break;
+                }
+                if (client_socket == TG_INVALID_SOCKET) {
+                    break;
+                }
 
-        socket_t max_fd = (listen_fd > listen_ssl_fd) ? listen_fd : listen_ssl_fd;
-        int activity = select((int)(max_fd + 1), &read_fds, NULL, NULL, NULL);
-        if (activity < 0) {
-            perror("select() failed");
-            continue;
-        }
-
-        if (FD_ISSET(listen_fd, &read_fds)) {
-            socket_t client_socket = accept_client_socket(listen_fd);
-            if (client_socket != INVALID_SOCKET) {
                 Task task = {
                     .client_socket = client_socket,
                     .is_tls = false,
@@ -385,9 +823,16 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        if (FD_ISSET(listen_ssl_fd, &read_fds)) {
-            socket_t client_socket = accept_client_socket(listen_ssl_fd);
-            if (client_socket != INVALID_SOCKET) {
+        if (https_ready && listen_https != TG_INVALID_SOCKET) {
+            while (1) {
+                socket_t client_socket = accept_client_socket(listen_https);
+                if (client_socket == TG_NO_ACCEPTED_SOCKET) {
+                    break;
+                }
+                if (client_socket == TG_INVALID_SOCKET) {
+                    break;
+                }
+
                 Task task = {
                     .client_socket = client_socket,
                     .is_tls = true,
@@ -397,113 +842,67 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    for (int i = 0; i < config->worker_threads; i++) {
-        thrd_join(threads[i], NULL);
-    }
-
-    free(threads);
-    close_socket(listen_fd);
-    if (listen_ssl_fd != INVALID_SOCKET) {
-        close_socket(listen_ssl_fd);
-    }
+    accept_loop_cleanup(&accept_loop);
+    close_socket_if_valid(listen_http);
+    close_socket_if_valid(listen_https);
     backend_cache_cleanup(&backend_cache);
     tls_state_cleanup(&tls_state);
     free_config(config);
 
-#ifdef _WIN32
-    WSACleanup();
+#if TG_OS_WINDOWS
+    for (int i = 0; i < started_threads; i++) {
+        CloseHandle(workers[i]);
+    }
 #endif
+    free(workers);
+    socket_runtime_cleanup();
 
-    return EXIT_SUCCESS;
+    return EXIT_FAILURE;
 }
 
-void queue_init(TaskQueue* q) {
-    q->head = 0;
-    q->tail = 0;
-    q->count = 0;
-    mtx_init(&q->mutex, mtx_plain);
-    cnd_init(&q->not_empty);
-    cnd_init(&q->not_full);
-}
-
-void queue_push(TaskQueue* q, Task task) {
-    mtx_lock(&q->mutex);
-    while (q->count == TASK_QUEUE_SIZE) {
-        cnd_wait(&q->not_full, &q->mutex);
-    }
-    q->queue[q->tail] = task;
-    q->tail = (q->tail + 1) & (TASK_QUEUE_SIZE - 1);
-    q->count++;
-    cnd_signal(&q->not_empty);
-    mtx_unlock(&q->mutex);
-}
-
-Task queue_pop(TaskQueue* q) {
-    mtx_lock(&q->mutex);
-    while (q->count == 0) {
-        cnd_wait(&q->not_empty, &q->mutex);
-    }
-    Task task = q->queue[q->head];
-    q->head = (q->head + 1) & (TASK_QUEUE_SIZE - 1);
-    q->count--;
-    cnd_signal(&q->not_full);
-    mtx_unlock(&q->mutex);
-    return task;
-}
-
-int worker_thread(void* arg) {
-    const WorkerContext* context = (const WorkerContext*)arg;
-    while (1) {
-        Task task = queue_pop(&task_queue);
-        process_connection(task, context->config, context->tls_state, context->backend_cache);
-    }
-    return 0;
-}
-
-void process_connection(Task task, const Config* config, const TlsState* tls_state, const BackendCache* backend_cache) {
+static void process_connection(Task task, const Config* config, const TlsState* tls_state, const BackendCache* backend_cache, WorkerBuffers* buffers) {
+    // Handle one client from first read to proxy relay.
     socket_t client_socket = task.client_socket;
     SSL* client_ssl = NULL;
 
     if (task.is_tls) {
-#if TG_HAS_OPENSSL
         if (!tls_state || !tls_state->enabled || !tls_state->default_ctx) {
-            close_socket(client_socket);
+            close_socket_if_valid(client_socket);
             return;
         }
 
         client_ssl = SSL_new(tls_state->default_ctx);
         if (!client_ssl) {
-            close_socket(client_socket);
+            close_socket_if_valid(client_socket);
             return;
         }
 
         if (SSL_set_fd(client_ssl, (int)client_socket) != 1 || SSL_accept(client_ssl) <= 0) {
             SSL_free(client_ssl);
-            close_socket(client_socket);
+            close_socket_if_valid(client_socket);
             return;
         }
-#else
-        close_socket(client_socket);
-        return;
-#endif
     }
 
-    char buffer[BUFFER_SIZE];
-    io_count_t bytes_read = client_recv(client_socket, client_ssl, task.is_tls, buffer, sizeof(buffer) - 1);
+    if (buffers->io_buffer_size < 2) {
+        close_client(client_socket, client_ssl, task.is_tls);
+        return;
+    }
+
+    io_count_t bytes_read = client_recv(client_socket, client_ssl, task.is_tls, buffers->io_buffer, buffers->io_buffer_size - 1);
     if (bytes_read <= 0) {
         close_client(client_socket, client_ssl, task.is_tls);
         return;
     }
-    buffer[bytes_read] = '\0';
+    buffers->io_buffer[(size_t)bytes_read] = '\0';
 
-    char host[HOST_BUFFER_SIZE];
-    if (!try_parse_host(buffer, host, sizeof(host))) {
+    if (!parse_host_header(buffers->io_buffer, buffers->host_buffer, buffers->host_buffer_size)) {
         (void)client_send_all(client_socket, client_ssl, task.is_tls, RESPONSE_BAD_REQUEST, sizeof(RESPONSE_BAD_REQUEST) - 1);
         close_client(client_socket, client_ssl, task.is_tls);
         return;
     }
 
-    const ProxyRule* rule = find_rule(config, host);
+    const ProxyRule* rule = find_rule(config, buffers->host_buffer);
     if (!rule) {
         (void)client_send_all(client_socket, client_ssl, task.is_tls, RESPONSE_BAD_GATEWAY, sizeof(RESPONSE_BAD_GATEWAY) - 1);
         close_client(client_socket, client_ssl, task.is_tls);
@@ -511,14 +910,25 @@ void process_connection(Task task, const Config* config, const TlsState* tls_sta
     }
 
     if (!task.is_tls && rule->force_ssl) {
-        char target[TARGET_BUFFER_SIZE];
-        if (!try_parse_request_target(buffer, target, sizeof(target))) {
-            memcpy(target, "/", 2);
+        // Redirect plain HTTP to HTTPS when rule requests it.
+        if (!parse_request_target(buffers->io_buffer, buffers->target_buffer, buffers->target_buffer_size)) {
+            if (buffers->target_buffer_size >= 2) {
+                memcpy(buffers->target_buffer, "/", 2);
+            }
         }
 
-        bool can_redirect = tls_state && tls_state->enabled && tls_state_has_host(tls_state, host);
+        bool can_redirect = tls_state && tls_state->enabled && tls_state_has_host(tls_state, buffers->host_buffer);
         if (can_redirect) {
-            (void)send_redirect_to_https(client_socket, client_ssl, false, host, target, tls_state->listen_ssl_port);
+            (void)send_redirect_to_https(
+                client_socket,
+                client_ssl,
+                false,
+                buffers->host_buffer,
+                buffers->target_buffer,
+                tls_state->listen_ssl_port,
+                buffers->redirect_buffer,
+                buffers->redirect_buffer_size
+            );
         } else {
             (void)client_send_all(client_socket, client_ssl, false, RESPONSE_BAD_GATEWAY, sizeof(RESPONSE_BAD_GATEWAY) - 1);
         }
@@ -535,217 +945,146 @@ void process_connection(Task task, const Config* config, const TlsState* tls_sta
     }
 
     socket_t server_socket = socket(backend->ai_family, backend->ai_socktype, backend->ai_protocol);
-    if (server_socket == INVALID_SOCKET) {
+    if (server_socket == TG_INVALID_SOCKET) {
         close_client(client_socket, client_ssl, task.is_tls);
         return;
     }
 
     (void)tune_socket(server_socket, false);
 
-    if (connect(server_socket, (const struct sockaddr*)&backend->addr, backend->addr_len) < 0) {
-        close_socket(server_socket);
+    if (connect(server_socket, (const struct sockaddr*)&backend->addr, backend->addr_len) != 0) {
+        close_socket_if_valid(server_socket);
         close_client(client_socket, client_ssl, task.is_tls);
         return;
     }
 
-    if (!send_all(server_socket, buffer, (size_t)bytes_read)) {
-        close_socket(server_socket);
+    if (!send_all(server_socket, buffers->io_buffer, (size_t)bytes_read)) {
+        close_socket_if_valid(server_socket);
         close_client(client_socket, client_ssl, task.is_tls);
         return;
     }
 
-    relay_data(client_socket, client_ssl, task.is_tls, server_socket);
+    relay_data(client_socket, client_ssl, task.is_tls, server_socket, buffers->io_buffer, buffers->io_buffer_size);
 
-    close_socket(server_socket);
+    close_socket_if_valid(server_socket);
     close_client(client_socket, client_ssl, task.is_tls);
 }
 
-void relay_data(socket_t client_socket, SSL* client_ssl, bool client_is_tls, socket_t server_socket) {
-    char buffer[BUFFER_SIZE];
-    fd_set read_fds;
-    socket_t max_fd = (client_socket > server_socket) ? client_socket : server_socket;
-
-    struct timeval timeout;
-
+static void relay_data(socket_t client_socket, SSL* client_ssl, bool client_is_tls, socket_t server_socket, char* io_buffer, size_t io_buffer_size) {
+    // Bidirectional relay loop until timeout or close.
     while (1) {
+        fd_set read_fds;
         FD_ZERO(&read_fds);
         FD_SET(client_socket, &read_fds);
         FD_SET(server_socket, &read_fds);
 
-        timeout.tv_sec = 60;
-        timeout.tv_usec = 0;
+        struct timeval timeout = {
+            .tv_sec = 60,
+            .tv_usec = 0,
+        };
 
-        int activity = select((int)(max_fd + 1), &read_fds, NULL, NULL, &timeout);
+#if TG_OS_WINDOWS
+        int activity = select(0, &read_fds, NULL, NULL, &timeout);
+#else
+        socket_t max_fd = (client_socket > server_socket) ? client_socket : server_socket;
+        int activity = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
+#endif
         if (activity <= 0) {
             break;
         }
 
         if (FD_ISSET(client_socket, &read_fds)) {
-            io_count_t count = client_recv(client_socket, client_ssl, client_is_tls, buffer, sizeof(buffer));
+            io_count_t count = client_recv(client_socket, client_ssl, client_is_tls, io_buffer, io_buffer_size);
             if (count <= 0) {
                 break;
             }
-            if (!send_all(server_socket, buffer, (size_t)count)) {
+            if (!send_all(server_socket, io_buffer, (size_t)count)) {
                 break;
             }
         }
 
         if (FD_ISSET(server_socket, &read_fds)) {
-            io_count_t count = recv(server_socket, buffer, (int)sizeof(buffer), 0);
+            io_count_t count = recv(server_socket, io_buffer, length_to_int(io_buffer_size), 0);
             if (count <= 0) {
                 break;
             }
-            if (!client_send_all(client_socket, client_ssl, client_is_tls, buffer, (size_t)count)) {
+            if (!client_send_all(client_socket, client_ssl, client_is_tls, io_buffer, (size_t)count)) {
                 break;
             }
         }
     }
 }
 
-bool try_parse_host(const char* buffer, char* out_host, size_t out_size) {
-    const char* line = buffer;
-
-    while (*line != '\0') {
-        const char* line_end = strstr(line, "\r\n");
-        if (!line_end) {
-            return false;
-        }
-
-        if (line_end == line) {
-            return false;
-        }
-
-        size_t line_len = (size_t)(line_end - line);
-        if (line_len >= 5 &&
-            ((line[0] | 32) == 'h') &&
-            ((line[1] | 32) == 'o') &&
-            ((line[2] | 32) == 's') &&
-            ((line[3] | 32) == 't') &&
-            line[4] == ':') {
-            const char* host_start = line + 5;
-            while (host_start < line_end && (*host_start == ' ' || *host_start == '\t')) {
-                host_start++;
-            }
-
-            size_t host_len = (size_t)(line_end - host_start);
-            while (host_len > 0 && (host_start[host_len - 1] == ' ' || host_start[host_len - 1] == '\t')) {
-                host_len--;
-            }
-
-            if (host_len == 0 || host_len >= out_size) {
-                return false;
-            }
-
-            for (size_t i = 0; i < host_len; i++) {
-                out_host[i] = (char)tolower((unsigned char)host_start[i]);
-            }
-            out_host[host_len] = '\0';
-
-            if (out_host[0] == '[') {
-                char* closing_bracket = strchr(out_host, ']');
-                if (!closing_bracket) {
-                    return false;
-                }
-
-                size_t bracket_len = (size_t)(closing_bracket - (out_host + 1));
-                memmove(out_host, out_host + 1, bracket_len);
-                out_host[bracket_len] = '\0';
-            } else {
-                char* port_colon = strchr(out_host, ':');
-                if (port_colon) {
-                    *port_colon = '\0';
-                }
-            }
-
-            return out_host[0] != '\0';
-        }
-
-        line = line_end + 2;
-    }
-
-    return false;
-}
-
-bool try_parse_request_target(const char* buffer, char* out_target, size_t out_size) {
-    const char* line_end = strstr(buffer, "\r\n");
-    if (!line_end) {
-        if (out_size < 2) {
-            return false;
-        }
-        memcpy(out_target, "/", 2);
-        return true;
-    }
-
-    const char* first_space = strchr(buffer, ' ');
-    if (!first_space || first_space >= line_end) {
-        if (out_size < 2) {
-            return false;
-        }
-        memcpy(out_target, "/", 2);
-        return true;
-    }
-
-    const char* second_space = strchr(first_space + 1, ' ');
-    if (!second_space || second_space >= line_end || second_space <= first_space + 1) {
-        if (out_size < 2) {
-            return false;
-        }
-        memcpy(out_target, "/", 2);
-        return true;
-    }
-
-    size_t raw_len = (size_t)(second_space - (first_space + 1));
-    if (raw_len == 0) {
-        if (out_size < 2) {
-            return false;
-        }
-        memcpy(out_target, "/", 2);
-        return true;
-    }
-
-    if (raw_len + 1 > out_size) {
+static bool send_redirect_to_https(
+    socket_t socket_fd,
+    SSL* ssl,
+    bool is_tls,
+    const char* host,
+    const char* target,
+    int ssl_port,
+    char* response_buffer,
+    size_t response_buffer_size
+) {
+    if (!host || !target || !response_buffer || response_buffer_size == 0) {
         return false;
     }
 
-    memcpy(out_target, first_space + 1, raw_len);
-    out_target[raw_len] = '\0';
+    const char* prefix = "HTTP/1.1 301 Moved Permanently\r\nLocation: https://";
+    const char* suffix = "\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
 
-    const char* scheme = strstr(out_target, "://");
-    if (scheme && (scheme == out_target + 4 || scheme == out_target + 5)) {
-        const char* authority_start = scheme + 3;
-        const char* path_start = strchr(authority_start, '/');
-        if (!path_start) {
-            if (out_size < 2) {
-                return false;
-            }
-            memcpy(out_target, "/", 2);
-            return true;
-        }
+    size_t prefix_len = strlen(prefix);
+    size_t host_len = strlen(host);
+    size_t target_len = strlen(target);
+    size_t suffix_len = strlen(suffix);
 
-        size_t normalized_len = strlen(path_start);
-        if (normalized_len + 1 > out_size) {
+    char port_text[16] = {0};
+    size_t port_len = 0;
+
+    if (ssl_port != 443) {
+        int written = snprintf(port_text, sizeof(port_text), ":%d", ssl_port);
+        if (written <= 0 || (size_t)written >= sizeof(port_text)) {
             return false;
         }
-        memmove(out_target, path_start, normalized_len + 1);
-        return true;
+        port_len = (size_t)written;
     }
 
-    if (out_target[0] != '/') {
-        if (out_size < 2) {
-            return false;
-        }
-        memcpy(out_target, "/", 2);
-        return true;
+    size_t total_len = prefix_len + host_len + port_len + target_len + suffix_len;
+    if (total_len >= response_buffer_size) {
+        return false;
     }
 
-    return true;
+    char* out = response_buffer;
+    memcpy(out, prefix, prefix_len);
+    out += prefix_len;
+
+    memmove(out, host, host_len);
+    out += host_len;
+
+    if (port_len > 0) {
+        memcpy(out, port_text, port_len);
+        out += port_len;
+    }
+
+    memmove(out, target, target_len);
+    out += target_len;
+
+    memcpy(out, suffix, suffix_len);
+    out += suffix_len;
+
+    return client_send_all(socket_fd, ssl, is_tls, response_buffer, (size_t)(out - response_buffer));
 }
 
-bool send_all(socket_t socket, const char* data, size_t length) {
+static bool send_all(socket_t socket_fd, const char* data, size_t length) {
     size_t sent_total = 0;
     while (sent_total < length) {
-        int sent = socket_send(socket, data + sent_total, length - sent_total);
-        if (sent <= 0) {
+        int sent = socket_send(socket_fd, data + sent_total, length - sent_total);
+        if (sent < 0) {
+            if (net_error_is_interrupted(net_last_error())) {
+                continue;
+            }
+            return false;
+        }
+        if (sent == 0) {
             return false;
         }
         sent_total += (size_t)sent;
@@ -753,12 +1092,11 @@ bool send_all(socket_t socket, const char* data, size_t length) {
     return true;
 }
 
-bool client_send_all(socket_t socket, SSL* ssl, bool is_tls, const char* data, size_t length) {
-#if TG_HAS_OPENSSL
+static bool client_send_all(socket_t socket_fd, SSL* ssl, bool is_tls, const char* data, size_t length) {
     if (is_tls) {
         size_t sent_total = 0;
         while (sent_total < length) {
-            int sent = SSL_write(ssl, data + sent_total, (int)(length - sent_total));
+            int sent = SSL_write(ssl, data + sent_total, length_to_int(length - sent_total));
             if (sent <= 0) {
                 return false;
             }
@@ -766,112 +1104,192 @@ bool client_send_all(socket_t socket, SSL* ssl, bool is_tls, const char* data, s
         }
         return true;
     }
-#else
-    (void)ssl;
+
+    return send_all(socket_fd, data, length);
+}
+
+static io_count_t client_recv(socket_t socket_fd, SSL* ssl, bool is_tls, char* buffer, size_t length) {
     if (is_tls) {
+        return SSL_read(ssl, buffer, length_to_int(length));
+    }
+
+    return recv(socket_fd, buffer, length_to_int(length), 0);
+}
+
+static bool set_nonblocking(socket_t socket_fd) {
+#if TG_OS_WINDOWS
+    u_long mode = 1;
+    return ioctlsocket(socket_fd, FIONBIO, &mode) == 0;
+#else
+    int flags = fcntl(socket_fd, F_GETFL, 0);
+    if (flags < 0) {
         return false;
     }
-#endif
 
-    return send_all(socket, data, length);
+    if (fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+        return false;
+    }
+
+    return true;
+#endif
 }
 
-io_count_t client_recv(socket_t socket, SSL* ssl, bool is_tls, char* buffer, size_t length) {
-#if TG_HAS_OPENSSL
-    if (is_tls) {
-        return SSL_read(ssl, buffer, (int)length);
+static bool tune_socket(socket_t socket_fd, bool is_listener) {
+#if TG_OS_WINDOWS
+    BOOL enabled = TRUE;
+
+    if (is_listener) {
+        if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&enabled, sizeof(enabled)) != 0) {
+            return false;
+        }
     }
+
+    (void)setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&enabled, sizeof(enabled));
+    return true;
 #else
-    (void)ssl;
-    if (is_tls) {
-        return -1;
+    int enabled = 1;
+
+    if (is_listener) {
+        if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled)) != 0) {
+            return false;
+        }
+#ifdef SO_REUSEPORT
+        (void)setsockopt(socket_fd, SOL_SOCKET, SO_REUSEPORT, &enabled, sizeof(enabled));
+#endif
+#ifdef TCP_FASTOPEN
+        int fastopen_queue = 256;
+        (void)setsockopt(socket_fd, IPPROTO_TCP, TCP_FASTOPEN, &fastopen_queue, sizeof(fastopen_queue));
+#endif
     }
+
+#ifdef TCP_NODELAY
+    (void)setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled));
 #endif
 
-    return recv(socket, buffer, (int)length, 0);
+    return true;
+#endif
 }
 
-socket_t create_listen_socket(const char* listen_ip, int listen_port) {
-    socket_t listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd == INVALID_SOCKET) {
-        perror("socket() failed");
-        return INVALID_SOCKET;
+static int socket_send(socket_t socket_fd, const char* data, size_t length) {
+#if TG_OS_WINDOWS
+    return send(socket_fd, data, length_to_int(length), 0);
+#else
+#ifdef MSG_NOSIGNAL
+    return (int)send(socket_fd, data, length, MSG_NOSIGNAL);
+#else
+    return (int)send(socket_fd, data, length, 0);
+#endif
+#endif
+}
+
+static socket_t create_listen_socket(const char* listen_ip, int listen_port, int backlog) {
+    // Resolve and bind first address that works.
+    char port_text[16];
+    snprintf(port_text, sizeof(port_text), "%d", listen_port);
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    struct addrinfo* result = NULL;
+    const char* bind_host = (listen_ip && listen_ip[0] != '\0') ? listen_ip : NULL;
+    int gai_result = getaddrinfo(bind_host, port_text, &hints, &result);
+    if (gai_result != 0 || !result) {
+#if TG_OS_WINDOWS
+        fprintf(stderr, "getaddrinfo failed for listen socket: %d\n", gai_result);
+#else
+        fprintf(stderr, "getaddrinfo failed for listen socket: %s\n", gai_strerror(gai_result));
+#endif
+        return TG_INVALID_SOCKET;
     }
 
-    (void)tune_socket(listen_fd, true);
+    int actual_backlog = clamp_int(backlog, 64, SOMAXCONN);
+    socket_t listen_fd = TG_INVALID_SOCKET;
 
-    struct sockaddr_in server_addr = {0};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons((unsigned short)listen_port);
-    if (inet_pton(AF_INET, listen_ip, &server_addr.sin_addr) != 1) {
-        fprintf(stderr, "Invalid listen_ip: %s\n", listen_ip);
-        close_socket(listen_fd);
-        return INVALID_SOCKET;
+    for (struct addrinfo* current = result; current != NULL; current = current->ai_next) {
+        listen_fd = socket(current->ai_family, current->ai_socktype, current->ai_protocol);
+        if (listen_fd == TG_INVALID_SOCKET) {
+            continue;
+        }
+
+        if (!tune_socket(listen_fd, true)) {
+            close_socket_if_valid(listen_fd);
+            listen_fd = TG_INVALID_SOCKET;
+            continue;
+        }
+
+        if (!set_nonblocking(listen_fd)) {
+            close_socket_if_valid(listen_fd);
+            listen_fd = TG_INVALID_SOCKET;
+            continue;
+        }
+
+        if (bind(listen_fd, current->ai_addr, (socklen_t)current->ai_addrlen) != 0) {
+            close_socket_if_valid(listen_fd);
+            listen_fd = TG_INVALID_SOCKET;
+            continue;
+        }
+
+        if (listen(listen_fd, actual_backlog) != 0) {
+            close_socket_if_valid(listen_fd);
+            listen_fd = TG_INVALID_SOCKET;
+            continue;
+        }
+
+        break;
     }
 
-    if (bind(listen_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        perror("bind() failed");
-        close_socket(listen_fd);
-        return INVALID_SOCKET;
-    }
+    freeaddrinfo(result);
 
-    if (listen(listen_fd, SOMAXCONN) < 0) {
-        perror("listen() failed");
-        close_socket(listen_fd);
-        return INVALID_SOCKET;
+    if (listen_fd == TG_INVALID_SOCKET) {
+        fprintf(stderr, "Failed to bind listen socket for %s:%d\n", bind_host ? bind_host : "0.0.0.0", listen_port);
     }
 
     return listen_fd;
 }
 
-void close_client(socket_t socket, SSL* ssl, bool is_tls) {
-#if TG_HAS_OPENSSL
+static socket_t accept_client_socket(socket_t listen_socket) {
+    socket_t client_socket = accept(listen_socket, NULL, NULL);
+    if (client_socket == TG_INVALID_SOCKET) {
+        int error_code = net_last_error();
+        if (net_error_is_would_block(error_code) || net_error_is_interrupted(error_code)) {
+            return TG_NO_ACCEPTED_SOCKET;
+        }
+        return TG_INVALID_SOCKET;
+    }
+
+    (void)tune_socket(client_socket, false);
+    return client_socket;
+}
+
+static void close_socket_if_valid(socket_t socket_fd) {
+    if (socket_fd == TG_INVALID_SOCKET) {
+        return;
+    }
+
+#if TG_OS_WINDOWS
+    closesocket(socket_fd);
+#else
+    close(socket_fd);
+#endif
+}
+
+static void close_client(socket_t socket_fd, SSL* ssl, bool is_tls) {
     if (is_tls && ssl) {
         SSL_shutdown(ssl);
         SSL_free(ssl);
     }
-#else
-    (void)ssl;
-    (void)is_tls;
-#endif
-    close_socket(socket);
+    close_socket_if_valid(socket_fd);
 }
 
-bool send_redirect_to_https(socket_t socket, SSL* ssl, bool is_tls, const char* host, const char* target, int ssl_port) {
-    char response[REDIRECT_BUFFER_SIZE];
-    int written = 0;
-
-    if (ssl_port == 443) {
-        written = snprintf(
-            response,
-            sizeof(response),
-            "HTTP/1.1 301 Moved Permanently\r\nLocation: https://%s%s\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
-            host,
-            target
-        );
-    } else {
-        written = snprintf(
-            response,
-            sizeof(response),
-            "HTTP/1.1 301 Moved Permanently\r\nLocation: https://%s:%d%s\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
-            host,
-            ssl_port,
-            target
-        );
-    }
-
-    if (written <= 0 || (size_t)written >= sizeof(response)) {
-        return false;
-    }
-
-    return client_send_all(socket, ssl, is_tls, response, (size_t)written);
-}
-
-bool rule_has_tls_identity(const ProxyRule* rule) {
+static bool rule_has_tls_identity(const ProxyRule* rule) {
     return rule && rule->tls_cert_file && rule->tls_key_file && rule->tls_cert_file[0] != '\0' && rule->tls_key_file[0] != '\0';
 }
 
-bool tls_state_init(TlsState* tls_state, const Config* config) {
+static bool tls_state_init(TlsState* tls_state, const Config* config) {
+    // Build SSL contexts once at startup.
     memset(tls_state, 0, sizeof(*tls_state));
 
     if (config->listen_ssl_port <= 0) {
@@ -879,17 +1297,13 @@ bool tls_state_init(TlsState* tls_state, const Config* config) {
         return true;
     }
 
-    tls_state->enabled = true;
-    tls_state->listen_ssl_port = config->listen_ssl_port;
-
-#if !TG_HAS_OPENSSL
-    fprintf(stderr, "SSL support requires OpenSSL headers and libraries.\n");
-    return false;
-#else
     if (OPENSSL_init_ssl(0, NULL) != 1) {
         fprintf(stderr, "Failed to initialize OpenSSL.\n");
         return false;
     }
+
+    tls_state->enabled = true;
+    tls_state->listen_ssl_port = config->listen_ssl_port;
 
     for (const ProxyRule* rule = config->rules; rule != NULL; rule = rule->next) {
         if (!rule_has_tls_identity(rule)) {
@@ -902,6 +1316,8 @@ bool tls_state_init(TlsState* tls_state, const Config* config) {
             tls_state_cleanup(tls_state);
             return false;
         }
+
+        SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
 
         if (SSL_CTX_use_certificate_file(ctx, rule->tls_cert_file, SSL_FILETYPE_PEM) != 1) {
             fprintf(stderr, "Failed to load certificate for domain %s: %s\n", rule->entry_domain, rule->tls_cert_file);
@@ -924,7 +1340,7 @@ bool tls_state_init(TlsState* tls_state, const Config* config) {
             return false;
         }
 
-        TlsContextEntry* entry = malloc(sizeof(*entry));
+        TlsContextEntry* entry = calloc(1, sizeof(*entry));
         if (!entry) {
             SSL_CTX_free(ctx);
             tls_state_cleanup(tls_state);
@@ -953,11 +1369,9 @@ bool tls_state_init(TlsState* tls_state, const Config* config) {
     }
 
     return true;
-#endif
 }
 
-void tls_state_cleanup(TlsState* tls_state) {
-#if TG_HAS_OPENSSL
+static void tls_state_cleanup(TlsState* tls_state) {
     TlsContextEntry* current = tls_state->entries;
     while (current) {
         TlsContextEntry* next = current->next;
@@ -967,7 +1381,6 @@ void tls_state_cleanup(TlsState* tls_state) {
         free(current);
         current = next;
     }
-#endif
 
     tls_state->entries = NULL;
     tls_state->default_ctx = NULL;
@@ -975,24 +1388,27 @@ void tls_state_cleanup(TlsState* tls_state) {
     tls_state->listen_ssl_port = 0;
 }
 
-const TlsContextEntry* find_tls_entry(const TlsState* tls_state, const char* host) {
+static bool equal_ignore_case(const char* left, const char* right) {
+    while (*left && *right) {
+        if (tolower((unsigned char)*left) != tolower((unsigned char)*right)) {
+            return false;
+        }
+        left++;
+        right++;
+    }
+    return *left == '\0' && *right == '\0';
+}
+
+static const TlsContextEntry* find_tls_entry(const TlsState* tls_state, const char* host) {
     if (!tls_state || !host) {
         return NULL;
     }
 
-    char host_lower[HOST_BUFFER_SIZE];
-    size_t host_len = strlen(host);
-    if (host_len == 0 || host_len >= sizeof(host_lower)) {
-        return NULL;
-    }
-
-    for (size_t i = 0; i < host_len; i++) {
-        host_lower[i] = (char)tolower((unsigned char)host[i]);
-    }
-    host_lower[host_len] = '\0';
-
     for (const TlsContextEntry* entry = tls_state->entries; entry != NULL; entry = entry->next) {
-        if (entry->rule && entry->rule->entry_domain_lower && strcmp(entry->rule->entry_domain_lower, host_lower) == 0) {
+        if (!entry->rule || !entry->rule->entry_domain) {
+            continue;
+        }
+        if (equal_ignore_case(entry->rule->entry_domain, host)) {
             return entry;
         }
     }
@@ -1000,11 +1416,12 @@ const TlsContextEntry* find_tls_entry(const TlsState* tls_state, const char* hos
     return NULL;
 }
 
-bool tls_state_has_host(const TlsState* tls_state, const char* host) {
+static bool tls_state_has_host(const TlsState* tls_state, const char* host) {
     return find_tls_entry(tls_state, host) != NULL;
 }
 
-bool backend_cache_init(BackendCache* cache, const Config* config) {
+static bool backend_cache_init(BackendCache* cache, const Config* config) {
+    // Resolve backend endpoints once to keep request path fast.
     cache->entries = NULL;
 
     for (const ProxyRule* rule = config->rules; rule != NULL; rule = rule->next) {
@@ -1014,21 +1431,23 @@ bool backend_cache_init(BackendCache* cache, const Config* config) {
             return false;
         }
 
-        struct addrinfo hints = {0};
+        struct addrinfo hints;
+        memset(&hints, 0, sizeof(hints));
         hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_STREAM;
 
-        char port_str[6];
-        snprintf(port_str, sizeof(port_str), "%d", rule->backend_port);
+        char port_text[16];
+        snprintf(port_text, sizeof(port_text), "%d", rule->backend_port);
 
         struct addrinfo* result = NULL;
-        if (getaddrinfo(rule->backend_host, port_str, &hints, &result) != 0 || result == NULL) {
+        int gai_result = getaddrinfo(rule->backend_host, port_text, &hints, &result);
+        if (gai_result != 0 || !result) {
             fprintf(stderr, "Failed to resolve backend %s:%d for domain %s\n", rule->backend_host, rule->backend_port, rule->entry_domain);
             backend_cache_cleanup(cache);
             return false;
         }
 
-        BackendEntry* entry = malloc(sizeof(*entry));
+        BackendEntry* entry = calloc(1, sizeof(*entry));
         if (!entry) {
             freeaddrinfo(result);
             backend_cache_cleanup(cache);
@@ -1038,7 +1457,6 @@ bool backend_cache_init(BackendCache* cache, const Config* config) {
         if ((size_t)result->ai_addrlen > sizeof(entry->addr)) {
             free(entry);
             freeaddrinfo(result);
-            fprintf(stderr, "Resolved backend address too large for domain %s\n", rule->entry_domain);
             backend_cache_cleanup(cache);
             return false;
         }
@@ -1063,7 +1481,7 @@ bool backend_cache_init(BackendCache* cache, const Config* config) {
     return true;
 }
 
-void backend_cache_cleanup(BackendCache* cache) {
+static void backend_cache_cleanup(BackendCache* cache) {
     BackendEntry* current = cache->entries;
     while (current) {
         BackendEntry* next = current->next;
@@ -1073,7 +1491,7 @@ void backend_cache_cleanup(BackendCache* cache) {
     cache->entries = NULL;
 }
 
-const BackendEntry* backend_cache_find(const BackendCache* cache, const ProxyRule* rule) {
+static const BackendEntry* backend_cache_find(const BackendCache* cache, const ProxyRule* rule) {
     if (!cache || !rule) {
         return NULL;
     }
@@ -1087,68 +1505,33 @@ const BackendEntry* backend_cache_find(const BackendCache* cache, const ProxyRul
     return NULL;
 }
 
-bool tune_socket(socket_t socket, bool is_listener) {
-    int enabled = 1;
-    bool success = true;
-
-    if (is_listener) {
-        if (setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&enabled, sizeof(enabled)) != 0) {
-            success = false;
-        }
-#if defined(SO_REUSEPORT)
-        (void)setsockopt(socket, SOL_SOCKET, SO_REUSEPORT, (const char*)&enabled, sizeof(enabled));
+static int net_last_error(void) {
+#if TG_OS_WINDOWS
+    return WSAGetLastError();
+#else
+    return errno;
 #endif
-#if defined(__FreeBSD__) && defined(SO_REUSEPORT_LB)
-        // FreeBSD load-balancing.
-        (void)setsockopt(socket, SOL_SOCKET, SO_REUSEPORT_LB, (const char*)&enabled, sizeof(enabled));
-#endif
-#if defined(TCP_FASTOPEN)
-    int fastopen_queue = 256;
-    (void)setsockopt(socket, IPPROTO_TCP, TCP_FASTOPEN, (const char*)&fastopen_queue, sizeof(fastopen_queue));
-#endif
-    }
-
-#if defined(SO_NOSIGPIPE)
-    // FreeBSD SO_NOSIGPIPE.
-    (void)setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, (const char*)&enabled, sizeof(enabled));
-#endif
-#if defined(TCP_NODELAY)
-    (void)setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, (const char*)&enabled, sizeof(enabled));
-#endif
-
-    return success;
 }
 
-socket_t accept_client_socket(socket_t listen_socket) {
-    socket_t client_socket = INVALID_SOCKET;
-
-#if defined(__FreeBSD__) && defined(SOCK_CLOEXEC)
-    client_socket = accept4(listen_socket, NULL, NULL, SOCK_CLOEXEC);
-    if (client_socket != INVALID_SOCKET) {
-        (void)tune_socket(client_socket, false);
-        return client_socket;
-    }
-
-    if (errno != ENOSYS && errno != EINVAL) {
-        return INVALID_SOCKET;
-    }
+static bool net_error_is_would_block(int error_code) {
+#if TG_OS_WINDOWS
+    return error_code == WSAEWOULDBLOCK;
+#else
+    return error_code == EAGAIN || error_code == EWOULDBLOCK;
 #endif
-
-    client_socket = accept(listen_socket, NULL, NULL);
-    if (client_socket != INVALID_SOCKET) {
-        (void)tune_socket(client_socket, false);
-    }
-    return client_socket;
 }
 
-int socket_send(socket_t socket, const char* data, size_t length) {
-#if defined(_WIN32)
-    return send(socket, data, (int)length, 0);
+static bool net_error_is_interrupted(int error_code) {
+#if TG_OS_WINDOWS
+    return error_code == WSAEINTR;
 #else
-#if defined(MSG_NOSIGNAL)
-    return (int)send(socket, data, length, MSG_NOSIGNAL);
-#else
-    return (int)send(socket, data, length, 0);
+    return error_code == EINTR;
 #endif
-#endif
+}
+
+static int length_to_int(size_t length) {
+    if (length > (size_t)INT_MAX) {
+        return INT_MAX;
+    }
+    return (int)length;
 }
