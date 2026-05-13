@@ -196,80 +196,6 @@ jobs:
           if-no-files-found: error
           path: tinygate-*-windows-x86_64.tar.gz
 
-  build-windows-arm64:
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TAG_NAME }}
-
-      - name: Setup MSYS2
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-clang
-            mingw-w64-x86_64-lld
-            mingw-w64-clang-aarch64-toolchain
-            mingw-w64-clang-aarch64-openssl
-            tar
-
-      - name: Build binary
-        shell: msys2 {0}
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE"
-
-          if command -v aarch64-w64-mingw32-gcc >/dev/null 2>&1; then
-            echo "Using aarch64-w64-mingw32-gcc cross compiler"
-            aarch64-w64-mingw32-gcc --version
-            aarch64-w64-mingw32-gcc \
-              -std=c2x -O2 -Wall -Wextra -pedantic \
-              main.c config.c http_parser.c \
-              -o tinygate.exe \
-              -lws2_32 -lssl -lcrypto
-          else
-            echo "aarch64-w64-mingw32-gcc not found, using clang fallback"
-            clang --version
-            if [ -x /mingw64/bin/ld.lld.exe ]; then
-              LD_LLD=/mingw64/bin/ld.lld.exe
-            elif [ -x /mingw64/bin/ld.lld ]; then
-              LD_LLD=/mingw64/bin/ld.lld
-            else
-              echo "ld.lld not found in /mingw64/bin"
-              ls -la /mingw64/bin | grep -E 'ld|lld' || true
-              exit 1
-            fi
-            "$LD_LLD" --version
-
-            clang \
-              --target=aarch64-w64-windows-gnu \
-              --sysroot=/clangarm64 \
-              --ld-path="$LD_LLD" \
-              -fuse-ld=lld \
-              --rtlib=compiler-rt \
-              --unwindlib=none \
-              -std=c2x -O2 -Wall -Wextra -pedantic \
-              -I/clangarm64/include \
-              -L/clangarm64/lib \
-              main.c config.c http_parser.c \
-              -o tinygate.exe \
-              -lws2_32 -lssl -lcrypto
-          fi
-
-          mkdir -p out/windows-arm64
-          cp tinygate.exe README.md LICENSE out/windows-arm64/
-          tar -C out/windows-arm64 -czf "tinygate-${VERSION}-windows-arm64.tar.gz" tinygate.exe README.md LICENSE
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-windows-arm64
-          if-no-files-found: error
-          path: tinygate-*-windows-arm64.tar.gz
-
   build-freebsd-x86_64:
     runs-on: ubuntu-24.04
     steps:
@@ -368,7 +294,6 @@ jobs:
       - build-linux-x86_64
       - build-linux-arm64
       - build-windows-x86_64
-      - build-windows-arm64
       - build-freebsd-x86_64
     runs-on: ubuntu-24.04
     permissions:
@@ -385,8 +310,8 @@ jobs:
         run: |
           set -euo pipefail
           file_count="$(find release-assets -maxdepth 1 -type f | wc -l)"
-          if [ "$file_count" -ne 10 ]; then
-            echo "Expected 10 release files, got $file_count"
+          if [ "$file_count" -ne 9 ]; then
+            echo "Expected 9 release files, got $file_count"
             find release-assets -maxdepth 1 -type f -print
             exit 1
           fi

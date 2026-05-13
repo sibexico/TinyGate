@@ -96,7 +96,6 @@ Build targets:
 make linux-x86_64
 make linux-arm64
 make windows-x86_64
-make windows-arm64
 make freebsd-x86_64
 ```
 
