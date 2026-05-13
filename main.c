@@ -1,3 +1,12 @@
+#if !defined(_WIN32)
+    #ifndef _POSIX_C_SOURCE
+        #define _POSIX_C_SOURCE 200809L
+    #endif
+    #ifndef _DEFAULT_SOURCE
+        #define _DEFAULT_SOURCE
+    #endif
+#endif
+
 #if defined(__linux__)
     #define TG_OS_LINUX 1
 #elif defined(__FreeBSD__)
