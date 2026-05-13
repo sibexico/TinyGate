@@ -1,11 +1,11 @@
 Name:           tinygate
-Version:        __VERSION__
+Version:        __RPM_VERSION__
 Release:        1%{?dist}
 Summary:        TinyGate reverse proxy
 
 License:        MIT
 URL:            https://github.com/sibexico/tinygate
-Source0:        tinygate-__VERSION__-linux-__SOURCE_ARCH__.tar.gz
+Source0:        tinygate-__SOURCE_VERSION__-linux-__SOURCE_ARCH__.tar.gz
 BuildArch:      __RPM_ARCH__
 Requires:       openssl-libs
 
@@ -31,5 +31,5 @@ install -m 0644 LICENSE %{buildroot}/usr/local/share/doc/tinygate/LICENSE
 /usr/local/share/doc/tinygate/LICENSE
 
 %changelog
-* May 2026 Nicolas Altmann <dev@sibexi.co> - __VERSION__-1
+* May 2026 Nicolas Altmann <dev@sibexi.co> - __RPM_VERSION__-1
 - Automated release build

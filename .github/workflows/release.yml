@@ -38,6 +38,10 @@ jobs:
       - name: Build deb package
         run: |
           set -euo pipefail
+          DEB_VERSION="${VERSION#v}"
+          if ! printf '%s' "$DEB_VERSION" | grep -Eq '^[0-9]'; then
+            DEB_VERSION="0~${DEB_VERSION}"
+          fi
 
           mkdir -p pkg/deb/DEBIAN
           mkdir -p pkg/deb/usr/local/bin
@@ -47,7 +51,7 @@ jobs:
           cp README.md pkg/deb/usr/local/share/doc/tinygate/README.md
           cp LICENSE pkg/deb/usr/local/share/doc/tinygate/LICENSE
 
-          sed -e "s/__VERSION__/${VERSION}/g" \
+            sed -e "s/__VERSION__/${DEB_VERSION}/g" \
               -e "s/__DEB_ARCH__/amd64/g" \
               distrib/deb/control.in > pkg/deb/DEBIAN/control
           dpkg-deb --build pkg/deb "tinygate-${VERSION}-linux-x86_64.deb"
@@ -55,10 +59,16 @@ jobs:
       - name: Build rpm package
         run: |
           set -euo pipefail
+          RPM_VERSION="${VERSION#v}"
+          RPM_VERSION="${RPM_VERSION//-/.}"
+          if ! printf '%s' "$RPM_VERSION" | grep -Eq '^[0-9]'; then
+            RPM_VERSION="0.${RPM_VERSION}"
+          fi
 
           mkdir -p rpmbuild/SOURCES rpmbuild/SPECS rpmbuild/BUILD rpmbuild/RPMS rpmbuild/SRPMS
           cp "tinygate-${VERSION}-linux-x86_64.tar.gz" rpmbuild/SOURCES/
-          sed -e "s/__VERSION__/${VERSION}/g" \
+          sed -e "s/__RPM_VERSION__/${RPM_VERSION}/g" \
+              -e "s/__SOURCE_VERSION__/${VERSION}/g" \
               -e "s/__SOURCE_ARCH__/x86_64/g" \
               -e "s/__RPM_ARCH__/x86_64/g" \
               distrib/rpm/tinygate.spec.in > rpmbuild/SPECS/tinygate.spec
@@ -101,6 +111,10 @@ jobs:
       - name: Build deb package
         run: |
           set -euo pipefail
+          DEB_VERSION="${VERSION#v}"
+          if ! printf '%s' "$DEB_VERSION" | grep -Eq '^[0-9]'; then
+            DEB_VERSION="0~${DEB_VERSION}"
+          fi
 
           mkdir -p pkg/deb/DEBIAN
           mkdir -p pkg/deb/usr/local/bin
@@ -110,7 +124,7 @@ jobs:
           cp README.md pkg/deb/usr/local/share/doc/tinygate/README.md
           cp LICENSE pkg/deb/usr/local/share/doc/tinygate/LICENSE
 
-          sed -e "s/__VERSION__/${VERSION}/g" \
+            sed -e "s/__VERSION__/${DEB_VERSION}/g" \
               -e "s/__DEB_ARCH__/arm64/g" \
               distrib/deb/control.in > pkg/deb/DEBIAN/control
           dpkg-deb --build pkg/deb "tinygate-${VERSION}-linux-arm64.deb"
@@ -118,10 +132,16 @@ jobs:
       - name: Build rpm package
         run: |
           set -euo pipefail
+          RPM_VERSION="${VERSION#v}"
+          RPM_VERSION="${RPM_VERSION//-/.}"
+          if ! printf '%s' "$RPM_VERSION" | grep -Eq '^[0-9]'; then
+            RPM_VERSION="0.${RPM_VERSION}"
+          fi
 
           mkdir -p rpmbuild/SOURCES rpmbuild/SPECS rpmbuild/BUILD rpmbuild/RPMS rpmbuild/SRPMS
           cp "tinygate-${VERSION}-linux-arm64.tar.gz" rpmbuild/SOURCES/
-          sed -e "s/__VERSION__/${VERSION}/g" \
+          sed -e "s/__RPM_VERSION__/${RPM_VERSION}/g" \
+              -e "s/__SOURCE_VERSION__/${VERSION}/g" \
               -e "s/__SOURCE_ARCH__/arm64/g" \
               -e "s/__RPM_ARCH__/aarch64/g" \
               distrib/rpm/tinygate.spec.in > rpmbuild/SPECS/tinygate.spec
