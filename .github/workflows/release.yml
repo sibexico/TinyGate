@@ -277,7 +277,22 @@ jobs:
         shell: freebsd {0}
         run: |
           set -eux
-          cd "$HOME/work"
+
+          if [ ! -f main.c ]; then
+            if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -f "$GITHUB_WORKSPACE/main.c" ]; then
+              cd "$GITHUB_WORKSPACE"
+            elif [ -f "$HOME/work/main.c" ]; then
+              cd "$HOME/work"
+            fi
+          fi
+
+          if [ ! -f main.c ]; then
+            echo "Could not locate source files in FreeBSD VM workspace"
+            echo "PWD=$(pwd)"
+            echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE:-<unset>}"
+            ls -la
+            exit 1
+          fi
 
           VERSION='${{ env.VERSION }}'
           if [ -z "$VERSION" ]; then
