@@ -222,10 +222,12 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
           clang --version
+          ld.lld --version || true
 
           clang \
             --target=aarch64-w64-windows-gnu \
             --sysroot=/clangarm64 \
+            -fuse-ld=lld \
             -std=c2x -O2 -Wall -Wextra -pedantic \
             -I/clangarm64/include \
             -L/clangarm64/lib \
@@ -265,12 +267,15 @@ jobs:
               echo "VERSION is empty in FreeBSD VM step"
               exit 1
             fi
-            PKG_VERSION="${VERSION#v}"
-            PKG_VERSION="${PKG_VERSION//-/.}"
+            PKG_VERSION="$(printf '%s' "$VERSION" | sed -e 's/^v//' -e 's/-/./g')"
             if [ -z "$PKG_VERSION" ]; then
               echo "PKG_VERSION is empty in FreeBSD VM step"
               exit 1
             fi
+            case "$PKG_VERSION" in
+              [0-9]*) ;;
+              *) PKG_VERSION="0.${PKG_VERSION}" ;;
+            esac
 
             env ASSUME_ALWAYS_YES=yes pkg bootstrap -f
             env ASSUME_ALWAYS_YES=yes pkg install openssl
