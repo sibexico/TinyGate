@@ -1,0 +1,35 @@
+Name:           tinygate
+Version:        __VERSION__
+Release:        1%{?dist}
+Summary:        TinyGate reverse proxy
+
+License:        MIT
+URL:            https://github.com/sibexico/tinygate
+Source0:        tinygate-__VERSION__-linux-x86_64.tar.gz
+BuildArch:      x86_64
+Requires:       openssl-libs
+
+%description
+TinyGate is a small reverse proxy for HTTP and HTTPS traffic.
+
+%prep
+%setup -q -c -T
+%{__tar} -xzf %{SOURCE0}
+
+%build
+
+%install
+mkdir -p %{buildroot}/usr/local/bin
+install -m 0755 tinygate %{buildroot}/usr/local/bin/tinygate
+mkdir -p %{buildroot}/usr/local/share/doc/tinygate
+install -m 0644 README.md %{buildroot}/usr/local/share/doc/tinygate/README.md
+install -m 0644 LICENSE %{buildroot}/usr/local/share/doc/tinygate/LICENSE
+
+%files
+/usr/local/bin/tinygate
+/usr/local/share/doc/tinygate/README.md
+/usr/local/share/doc/tinygate/LICENSE
+
+%changelog
+* May 2026 Nicolas Altmann <dev@sibexi.co> - __VERSION__-1
+- Automated release build

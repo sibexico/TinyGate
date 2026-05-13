@@ -1,0 +1,262 @@
+name: Release Build
+
+on:
+  release:
+    types:
+      - created
+
+permissions:
+  contents: write
+
+env:
+  TAG_NAME: ${{ github.event.release.tag_name }}
+  VERSION: ${{ github.event.release.tag_name }}
+
+jobs:
+  build-linux-x86_64:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG_NAME }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev rpm dpkg-dev
+
+      - name: Build binary
+        run: |
+          set -euo pipefail
+          gcc -std=c23 -O3 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate -pthread -lssl -lcrypto
+
+          mkdir -p out/linux-x86_64
+          cp tinygate README.md LICENSE out/linux-x86_64/
+          tar -C out/linux-x86_64 -czf "tinygate-${VERSION}-linux-x86_64.tar.gz" tinygate README.md LICENSE
+
+      - name: Build deb package
+        run: |
+          set -euo pipefail
+
+          mkdir -p pkg/deb/DEBIAN
+          mkdir -p pkg/deb/usr/local/bin
+          mkdir -p pkg/deb/usr/local/share/doc/tinygate
+
+          cp tinygate pkg/deb/usr/local/bin/tinygate
+          cp README.md pkg/deb/usr/local/share/doc/tinygate/README.md
+          cp LICENSE pkg/deb/usr/local/share/doc/tinygate/LICENSE
+
+          sed "s/__VERSION__/${VERSION}/g" distrib/deb/control.in > pkg/deb/DEBIAN/control
+          dpkg-deb --build pkg/deb "tinygate-${VERSION}-linux-x86_64.deb"
+
+      - name: Build rpm package
+        run: |
+          set -euo pipefail
+
+          mkdir -p rpmbuild/SOURCES rpmbuild/SPECS rpmbuild/BUILD rpmbuild/RPMS rpmbuild/SRPMS
+          cp "tinygate-${VERSION}-linux-x86_64.tar.gz" rpmbuild/SOURCES/
+          sed "s/__VERSION__/${VERSION}/g" distrib/rpm/tinygate.spec.in > rpmbuild/SPECS/tinygate.spec
+
+          rpmbuild --define "_topdir ${PWD}/rpmbuild" -bb rpmbuild/SPECS/tinygate.spec
+          cp rpmbuild/RPMS/x86_64/*.rpm "tinygate-${VERSION}-linux-x86_64.rpm"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-x86_64
+          if-no-files-found: error
+          path: |
+            tinygate-*-linux-x86_64.tar.gz
+            tinygate-*-linux-x86_64.deb
+            tinygate-*-linux-x86_64.rpm
+
+  build-linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG_NAME }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev
+
+      - name: Build binary
+        run: |
+          set -euo pipefail
+          gcc -std=c23 -O3 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate -pthread -lssl -lcrypto
+
+          mkdir -p out/linux-arm64
+          cp tinygate README.md LICENSE out/linux-arm64/
+          tar -C out/linux-arm64 -czf "tinygate-${VERSION}-linux-arm64.tar.gz" tinygate README.md LICENSE
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-arm64
+          if-no-files-found: error
+          path: tinygate-*-linux-arm64.tar.gz
+
+  build-windows-x86_64:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG_NAME }}
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-openssl
+            tar
+
+      - name: Build binary
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+
+          gcc -std=c23 -O2 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate.exe -lws2_32 -lssl -lcrypto
+
+          mkdir -p out/windows-x86_64
+          cp tinygate.exe README.md LICENSE out/windows-x86_64/
+          tar -C out/windows-x86_64 -czf "tinygate-${VERSION}-windows-x86_64.tar.gz" tinygate.exe README.md LICENSE
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x86_64
+          if-no-files-found: error
+          path: tinygate-*-windows-x86_64.tar.gz
+
+  build-windows-arm64:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG_NAME }}
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          update: true
+          install: >-
+            mingw-w64-clang-aarch64-toolchain
+            mingw-w64-clang-aarch64-openssl
+            tar
+
+      - name: Build binary
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+
+          clang -std=c23 -O2 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate.exe -lws2_32 -lssl -lcrypto
+
+          mkdir -p out/windows-arm64
+          cp tinygate.exe README.md LICENSE out/windows-arm64/
+          tar -C out/windows-arm64 -czf "tinygate-${VERSION}-windows-arm64.tar.gz" tinygate.exe README.md LICENSE
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-arm64
+          if-no-files-found: error
+          path: tinygate-*-windows-arm64.tar.gz
+
+  build-freebsd-x86_64:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG_NAME }}
+
+      - name: Build binary and pkg in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.2"
+          usesh: true
+          copyback: true
+          run: |
+            set -eu
+
+            pkg install -y openssl
+            cc -std=c23 -O3 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate -pthread -lssl -lcrypto
+
+            mkdir -p out/freebsd-x86_64
+            cp tinygate README.md LICENSE out/freebsd-x86_64/
+            tar -C out/freebsd-x86_64 -czf "tinygate-${VERSION}-freebsd-x86_64.tar.gz" tinygate README.md LICENSE
+
+            ABI_VALUE="$(pkg config ABI)"
+            ARCH_VALUE="$(uname -m)"
+
+            mkdir -p pkgroot/usr/local/bin
+            mkdir -p pkgroot/usr/local/share/doc/tinygate
+            cp tinygate pkgroot/usr/local/bin/tinygate
+            cp README.md pkgroot/usr/local/share/doc/tinygate/README.md
+            cp LICENSE pkgroot/usr/local/share/doc/tinygate/LICENSE
+
+            sed -e "s/__VERSION__/${VERSION}/g" \
+                -e "s/__ABI__/${ABI_VALUE}/g" \
+                -e "s/__ARCH__/${ARCH_VALUE}/g" \
+                distrib/freebsd/manifest.ucl.in > tinygate.ucl
+
+            pkg create -M tinygate.ucl -r pkgroot -o .
+            mv tinygate-*.pkg "tinygate-${VERSION}-freebsd-x86_64.pkg"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-freebsd-x86_64
+          if-no-files-found: error
+          path: |
+            tinygate-*-freebsd-x86_64.tar.gz
+            tinygate-*-freebsd-x86_64.pkg
+
+  publish-release:
+    needs:
+      - build-linux-x86_64
+      - build-linux-arm64
+      - build-windows-x86_64
+      - build-windows-arm64
+      - build-freebsd-x86_64
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Validate release assets
+        run: |
+          set -euo pipefail
+          file_count="$(find release-assets -maxdepth 1 -type f | wc -l)"
+          if [ "$file_count" -ne 8 ]; then
+            echo "Expected 8 release files, got $file_count"
+            find release-assets -maxdepth 1 -type f -print
+            exit 1
+          fi
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: ${{ env.TAG_NAME }}
+          files: release-assets/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

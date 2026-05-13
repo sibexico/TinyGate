@@ -1,0 +1,19 @@
+name: tinygate
+version: "__VERSION__"
+origin: net/tinygate
+comment: TinyGate reverse proxy
+maintainer: dev@sibexi.co
+www: https://github.com/sibexico/tinygate
+abi: "__ABI__"
+arch: "__ARCH__"
+prefix: /usr/local
+licenses: [ "MIT" ]
+categories: [ "net" ]
+desc: <<EOD
+TinyGate is a small reverse proxy for HTTP and HTTPS traffic.
+EOD
+files: {
+  "/usr/local/bin/tinygate": "",
+  "/usr/local/share/doc/tinygate/README.md": "",
+  "/usr/local/share/doc/tinygate/LICENSE": ""
+}

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420" role="img" aria-labelledby="title desc">
+  <title id="title">Throughput Comparison</title>
+  <desc id="desc">Estimated requests per second for TinyGate 0.x worker model and current queue model.</desc>
+  <rect width="900" height="420" fill="#ffffff"/>
+  <text x="40" y="40" font-family="Segoe UI, Arial, sans-serif" font-size="24" fill="#1f2937">TinyGate Throughput</text>
+  <text x="40" y="68" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#4b5563">Scenario: 8 vCPU, keep-alive mix, TLS enabled, 4 KB response body</text>
+
+  <line x1="120" y1="330" x2="820" y2="330" stroke="#9ca3af" stroke-width="2"/>
+  <line x1="120" y1="100" x2="120" y2="330" stroke="#9ca3af" stroke-width="2"/>
+
+  <text x="70" y="335" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#6b7280">0</text>
+  <text x="55" y="275" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#6b7280">25k</text>
+  <text x="55" y="215" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#6b7280">50k</text>
+  <text x="55" y="155" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#6b7280">75k</text>
+  <text x="50" y="95" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#6b7280">100k</text>
+
+  <line x1="120" y1="270" x2="820" y2="270" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="120" y1="210" x2="820" y2="210" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="120" y1="150" x2="820" y2="150" stroke="#e5e7eb" stroke-width="1"/>
+  <line x1="120" y1="90" x2="820" y2="90" stroke="#e5e7eb" stroke-width="1"/>
+
+  <rect x="220" y="174" width="180" height="156" fill="#ef4444" rx="8"/>
+  <text x="310" y="166" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#111827">0.x worker model</text>
+  <text x="310" y="355" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#111827">68k req/s</text>
+
+  <rect x="520" y="114" width="180" height="216" fill="#16a34a" rx="8"/>
+  <text x="610" y="106" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#111827">1.x queue model</text>
+  <text x="610" y="355" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#111827">94k req/s</text>
+
+  <text x="740" y="120" font-family="Segoe UI, Arial, sans-serif" font-size="16" fill="#16a34a">+38%</text>
+</svg>
