@@ -48,6 +48,7 @@
     #if TG_OS_FREEBSD
         #include <sys/event.h>
         #include <sys/resource.h>
+        #include <sys/sysctl.h>
     #endif
 #endif
 
@@ -237,6 +238,12 @@ static int detect_worker_threads(void) {
     DWORD cores = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
     if (cores > 0 && cores <= (DWORD)INT_MAX) {
         return (int)cores;
+    }
+#elif TG_OS_FREEBSD
+    int cores = 0;
+    size_t cores_len = sizeof(cores);
+    if (sysctlbyname("hw.ncpu", &cores, &cores_len, NULL, 0) == 0 && cores > 0) {
+        return cores;
     }
 #else
     long cores = sysconf(_SC_NPROCESSORS_ONLN);

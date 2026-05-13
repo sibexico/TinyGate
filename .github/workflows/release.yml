@@ -222,29 +222,42 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
 
-          clang --version
-          if [ -x /mingw64/bin/ld.lld.exe ]; then
-            LD_LLD=/mingw64/bin/ld.lld.exe
-          elif [ -x /mingw64/bin/ld.lld ]; then
-            LD_LLD=/mingw64/bin/ld.lld
+          if command -v aarch64-w64-mingw32-gcc >/dev/null 2>&1; then
+            echo "Using aarch64-w64-mingw32-gcc cross compiler"
+            aarch64-w64-mingw32-gcc --version
+            aarch64-w64-mingw32-gcc \
+              -std=c2x -O2 -Wall -Wextra -pedantic \
+              main.c config.c http_parser.c \
+              -o tinygate.exe \
+              -lws2_32 -lssl -lcrypto
           else
-            echo "ld.lld not found in /mingw64/bin"
-            ls -la /mingw64/bin | grep -E 'ld|lld' || true
-            exit 1
-          fi
-          "$LD_LLD" --version
+            echo "aarch64-w64-mingw32-gcc not found, using clang fallback"
+            clang --version
+            if [ -x /mingw64/bin/ld.lld.exe ]; then
+              LD_LLD=/mingw64/bin/ld.lld.exe
+            elif [ -x /mingw64/bin/ld.lld ]; then
+              LD_LLD=/mingw64/bin/ld.lld
+            else
+              echo "ld.lld not found in /mingw64/bin"
+              ls -la /mingw64/bin | grep -E 'ld|lld' || true
+              exit 1
+            fi
+            "$LD_LLD" --version
 
-          clang \
-            --target=aarch64-w64-windows-gnu \
-            --sysroot=/clangarm64 \
-            --ld-path="$LD_LLD" \
-            -fuse-ld=lld \
-            -std=c2x -O2 -Wall -Wextra -pedantic \
-            -I/clangarm64/include \
-            -L/clangarm64/lib \
-            main.c config.c http_parser.c \
-            -o tinygate.exe \
-            -lws2_32 -lssl -lcrypto
+            clang \
+              --target=aarch64-w64-windows-gnu \
+              --sysroot=/clangarm64 \
+              --ld-path="$LD_LLD" \
+              -fuse-ld=lld \
+              --rtlib=compiler-rt \
+              --unwindlib=none \
+              -std=c2x -O2 -Wall -Wextra -pedantic \
+              -I/clangarm64/include \
+              -L/clangarm64/lib \
+              main.c config.c http_parser.c \
+              -o tinygate.exe \
+              -lws2_32 -lssl -lcrypto
+          fi
 
           mkdir -p out/windows-arm64
           cp tinygate.exe README.md LICENSE out/windows-arm64/
