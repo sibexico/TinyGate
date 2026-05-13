@@ -2,7 +2,7 @@ Package: tinygate
 Version: __VERSION__
 Section: net
 Priority: optional
-Architecture: amd64
+Architecture: __DEB_ARCH__
 Maintainer: Nicolas Altmann <dev@sibexi.co>
 Depends: libc6 (>= 2.31), libssl3
 Description: TinyGate reverse proxy
