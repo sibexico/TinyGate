@@ -207,9 +207,10 @@ jobs:
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
         with:
-          msystem: CLANGARM64
+          msystem: MINGW64
           update: true
           install: >-
+            mingw-w64-x86_64-clang
             mingw-w64-clang-aarch64-toolchain
             mingw-w64-clang-aarch64-openssl
             tar
@@ -220,7 +221,17 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
 
-          clang -std=c2x -O2 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate.exe -lws2_32 -lssl -lcrypto
+          clang --version
+
+          clang \
+            --target=aarch64-w64-windows-gnu \
+            --sysroot=/clangarm64 \
+            -std=c2x -O2 -Wall -Wextra -pedantic \
+            -I/clangarm64/include \
+            -L/clangarm64/lib \
+            main.c config.c http_parser.c \
+            -o tinygate.exe \
+            -lws2_32 -lssl -lcrypto
 
           mkdir -p out/windows-arm64
           cp tinygate.exe README.md LICENSE out/windows-arm64/
@@ -248,14 +259,22 @@ jobs:
           usesh: true
           copyback: true
           run: |
-            set -eu
+            set -eux
             VERSION='${{ env.VERSION }}'
             if [ -z "$VERSION" ]; then
               echo "VERSION is empty in FreeBSD VM step"
               exit 1
             fi
+            PKG_VERSION="${VERSION#v}"
+            PKG_VERSION="${PKG_VERSION//-/.}"
+            if [ -z "$PKG_VERSION" ]; then
+              echo "PKG_VERSION is empty in FreeBSD VM step"
+              exit 1
+            fi
 
-            pkg install -y openssl
+            env ASSUME_ALWAYS_YES=yes pkg bootstrap -f
+            env ASSUME_ALWAYS_YES=yes pkg install openssl
+            cc --version
             cc -std=c2x -O3 -Wall -Wextra -pedantic main.c config.c http_parser.c -o tinygate -pthread -lssl -lcrypto
 
             mkdir -p out/freebsd-x86_64
@@ -271,13 +290,18 @@ jobs:
             cp README.md pkgroot/usr/local/share/doc/tinygate/README.md
             cp LICENSE pkgroot/usr/local/share/doc/tinygate/LICENSE
 
-            sed -e "s/__VERSION__/${VERSION}/g" \
+            sed -e "s/__VERSION__/${PKG_VERSION}/g" \
                 -e "s/__ABI__/${ABI_VALUE}/g" \
                 -e "s/__ARCH__/${ARCH_VALUE}/g" \
                 distrib/freebsd/manifest.ucl.in > tinygate.ucl
 
             pkg create -M tinygate.ucl -r pkgroot -o .
-            mv tinygate-*.pkg "tinygate-${VERSION}-freebsd-x86_64.pkg"
+            set -- tinygate-*.pkg
+            if [ "$1" = "tinygate-*.pkg" ]; then
+              echo "FreeBSD package was not created"
+              exit 1
+            fi
+            mv "$1" "tinygate-${VERSION}-freebsd-x86_64.pkg"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
