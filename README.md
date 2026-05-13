@@ -2,7 +2,7 @@
  ![FreeBSD](https://img.shields.io/badge/FreeBSD-Native-red?labelColor=gray&logo=freebsd)
  ![Windows](https://img.shields.io/badge/Windows-Native-blue?labelColor=gray&logo=windows)
 
-[![Support Me](https://img.shields.io/badge/Support-Me-darkgreen?labelColor=black)](https://sibexi.co/support)
+[![Support Me](https://img.shields.io/badge/Support-Me-darkgreen?labelColor=black&logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iI0ZGRiIgZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0xMiAxQzUuOTI1IDEgMSA1LjkyNSAxIDEyczQuOTI1IDExIDExIDExIDExLTQuOTI1IDExLTExUzE4LjA3NSAxIDEyIDF6bTAgNGwyLjUgNi41SDIxbC01LjUgNCAyIDYuNUwxMiAxNy41IDYgMjJsMi02LjUtNS41LTRoNi41TDEyIDV6Ii8%2BPC9zdmc%2B)](https://sibexi.co/support)
 
 # TinyGate
 
@@ -10,6 +10,8 @@ TinyGate is a small reverse proxy written in C.
 It accepts HTTP and HTTPS traffic and routes by Host header.
 
 **This is an alpha version and it is not recommended for production use.**
+
+**Documentation is in progress.**
 
 Current platform support
 - Linux with epoll and POSIX sockets
@@ -177,8 +179,7 @@ The current version is queue-based.
 - Backend response already cached by backend service
 
 
-![Analytical throughput chart](distrib/benchmarks/throughput.svg)
+![Throughput chart](distrib/benchmarks/throughput.svg)
 
-Latency chart
 
-![Analytical latency chart](distrib/benchmarks/latency.svg)
+![Latency chart](distrib/benchmarks/latency.svg)
